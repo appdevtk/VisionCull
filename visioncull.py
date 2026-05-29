@@ -2,8 +2,11 @@
 """VisionCull — batch image scoring, classification, and curation using Apple Vision framework."""
 
 import argparse
+import ctypes
+import gc
 import json
 import os
+import resource
 import shutil
 import sys
 import time
@@ -13,8 +16,16 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import objc
+
 import Cocoa
+import Quartz
 import Vision
+
+
+def _get_rss_mb():
+    """Return current RSS in MB (macOS reports ru_maxrss in bytes)."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".tiff", ".tif"}
 LABEL_CONFIDENCE_THRESHOLD = 0.05
@@ -32,8 +43,8 @@ def scan_images(input_dir):
     return images
 
 
-def analyze_image(image_path):
-    """Run aesthetic scoring, classification, and feature extraction in one pass."""
+def analyze_image(image_path, subject_aware=False):
+    """Run aesthetic scoring, classification, feature extraction, and optional foreground mask."""
     url = Cocoa.NSURL.fileURLWithPath_(str(image_path))
     handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
 
@@ -41,9 +52,14 @@ def analyze_image(image_path):
     classify_req = Vision.VNClassifyImageRequest.alloc().init()
     featureprint_req = Vision.VNGenerateImageFeaturePrintRequest.alloc().init()
 
-    success, error = handler.performRequests_error_(
-        [aesthetic_req, classify_req, featureprint_req], None
-    )
+    requests = [aesthetic_req, classify_req, featureprint_req]
+
+    mask_req = None
+    if subject_aware:
+        mask_req = Vision.VNGenerateForegroundInstanceMaskRequest.alloc().init()
+        requests.append(mask_req)
+
+    success, error = handler.performRequests_error_(requests, None)
 
     if not success:
         return None
@@ -77,7 +93,76 @@ def analyze_image(image_path):
         raw = bytes(fp.data())
         result["feature_vector"] = np.frombuffer(raw, dtype=np.float32).copy()
 
+    # Foreground mask → subject colors
+    if mask_req and mask_req.results():
+        mask_obs = mask_req.results()[0]
+        try:
+            colors, coverage = _extract_subject_colors(mask_obs, handler)
+            result["subject_colors"] = colors
+            result["subject_coverage"] = coverage
+        except Exception:
+            result["subject_colors"] = []
+            result["subject_coverage"] = 0
+
     return result
+
+
+def _extract_subject_colors(mask_obs, handler, n=5):
+    """Extract named colors from foreground-only pixels of a masked image."""
+    instances = mask_obs.allInstances()
+    masked_buf, err = mask_obs.generateMaskedImageOfInstances_fromRequestHandler_croppedToInstancesExtent_error_(
+        instances, handler, False, None
+    )
+    if masked_buf is None:
+        return []
+
+    # CVPixelBuffer → CIImage → CGImage → numpy RGBA
+    ci_masked = Quartz.CIImage.imageWithCVPixelBuffer_(masked_buf)
+    ctx = Quartz.CIContext.contextWithOptions_(None)
+    extent = ci_masked.extent()
+    cg_masked = ctx.createCGImage_fromRect_(ci_masked, extent)
+
+    cg_w = Quartz.CGImageGetWidth(cg_masked)
+    cg_h = Quartz.CGImageGetHeight(cg_masked)
+    color_space = Quartz.CGColorSpaceCreateDeviceRGB()
+
+    bitmap_ctx = Quartz.CGBitmapContextCreate(
+        None, cg_w, cg_h, 8, cg_w * 4,
+        color_space,
+        Quartz.kCGImageAlphaPremultipliedLast,  # RGBA
+    )
+    Quartz.CGContextDrawImage(bitmap_ctx, ((0, 0), (cg_w, cg_h)), cg_masked)
+    data_ptr = Quartz.CGBitmapContextGetData(bitmap_ctx)
+
+    buf_len = cg_w * cg_h * 4
+    raw_bytes = data_ptr.as_buffer(buf_len)
+    arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(cg_h, cg_w, 4)
+
+    r, g, b, a = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2], arr[:, :, 3]
+
+    # Filter to foreground pixels (alpha > 128)
+    fg_mask = a > 128
+    fg_count = int(fg_mask.sum())
+    total = cg_w * cg_h
+    coverage = round(fg_count / total * 100, 1) if total > 0 else 0
+
+    if fg_count == 0:
+        return [], 0
+
+    fg_r, fg_g, fg_b = r[fg_mask], g[fg_mask], b[fg_mask]
+
+    # Downsample for speed — 10k pixels is plenty for color distribution
+    step = max(1, fg_count // 10000)
+    counts = Counter()
+    for ri, gi, bi in zip(fg_r[::step], fg_g[::step], fg_b[::step]):
+        counts[_rgb_to_color_name(int(ri), int(gi), int(bi))] += 1
+
+    total_sampled = sum(counts.values())
+    colors = [
+        {"color": color, "percentage": round(count / total_sampled * 100, 1)}
+        for color, count in counts.most_common(n)
+    ]
+    return colors, coverage
 
 
 def extract_dominant_colors(image_path, n=5):
@@ -330,6 +415,8 @@ def generate_report(image_data, clusters, select_indices, source_dir, processing
             },
             "labels": img.get("labels", []),
             "dominant_colors": img.get("dominant_colors", []),
+            "subject_colors": img.get("subject_colors", []),
+            "subject_coverage": img.get("subject_coverage", 0),
         }
         if "duplicate_cluster" in img:
             entry["duplicate_cluster"] = img["duplicate_cluster"]
@@ -391,6 +478,7 @@ def main():
     parser.add_argument("--min-score", type=float, default=0.0, help="Minimum aesthetic score")
     parser.add_argument("--enrich", action="store_true", help="Enrich selects with Claude Vision descriptions")
     parser.add_argument("--enrich-all", action="store_true", help="Enrich ALL images with Claude Vision descriptions")
+    parser.add_argument("--subject", action="store_true", help="Enable subject-aware foreground analysis (adds subject_colors, subject_coverage)")
     parser.add_argument("--tags", help="Comma-separated labels to filter selects (e.g., flower,rose)")
     args = parser.parse_args()
 
@@ -403,33 +491,41 @@ def main():
     print(f"Scanning {len(images)} images...")
     start_time = time.time()
 
-    # Analyze (aesthetic + classification + feature vectors)
+    # Analyze (aesthetic + classification + feature vectors + optional subject mask)
     image_data = []
     t0 = time.time()
+    print(f"[mem] baseline: {_get_rss_mb():.0f} MB RSS", file=sys.stderr)
     for i, img_path in enumerate(images):
         sys.stdout.write(f"\r  Analyzing:  {i + 1}/{len(images)}")
         sys.stdout.flush()
-        result = analyze_image(img_path)
-        if result is None:
-            result = {}
-        result["filename"] = img_path.name
-        result["path"] = str(img_path)
-        result["_index"] = i
-        image_data.append(result)
+        with objc.autorelease_pool():
+            result = analyze_image(img_path, subject_aware=args.subject)
+            if result is None:
+                result = {}
+            result["filename"] = img_path.name
+            result["path"] = str(img_path)
+            result["_index"] = i
+            image_data.append(result)
+        if (i + 1) % 5 == 0 or i == len(images) - 1:
+            gc.collect()
+            print(f"[mem] image {i + 1}/{len(images)}: {_get_rss_mb():.0f} MB RSS", file=sys.stderr)
     t_analyze = time.time() - t0
     print(f"  ({t_analyze:.1f}s)")
+    print(f"[mem] post-analyze: {_get_rss_mb():.0f} MB RSS", file=sys.stderr)
 
     # Dominant colors
     t0 = time.time()
     for i, img in enumerate(image_data):
         sys.stdout.write(f"\r  Colors:     {i + 1}/{len(image_data)}")
         sys.stdout.flush()
-        try:
-            img["dominant_colors"] = extract_dominant_colors(img["path"])
-        except Exception:
-            img["dominant_colors"] = []
+        with objc.autorelease_pool():
+            try:
+                img["dominant_colors"] = extract_dominant_colors(img["path"])
+            except Exception:
+                img["dominant_colors"] = []
     t_colors = time.time() - t0
     print(f"  ({t_colors:.1f}s)")
+    print(f"[mem] post-colors: {_get_rss_mb():.0f} MB RSS", file=sys.stderr)
 
     # Filter by min score
     if args.min_score > 0:
@@ -475,6 +571,20 @@ def main():
         print(f"  Top labels: {top}")
 
     print(f"  Selects: {len(select_indices)}")
+
+    if args.subject:
+        coverages = [img.get("subject_coverage", 0) for img in image_data if img.get("subject_coverage", 0) > 0]
+        if coverages:
+            avg_cov = sum(coverages) / len(coverages)
+            print(f"  Subject coverage: {avg_cov:.1f}% avg ({len(coverages)}/{len(image_data)} with foreground)")
+        # Top subject colors across selects
+        subj_color_counts = Counter()
+        for idx in select_indices:
+            for c in image_data[idx].get("subject_colors", []):
+                subj_color_counts[c["color"]] += 1
+        if subj_color_counts:
+            top_sc = ", ".join(f"{name}({count})" for name, count in subj_color_counts.most_common(5))
+            print(f"  Top subject colors (selects): {top_sc}")
 
     # Report
     if args.output:

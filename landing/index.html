@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VisionCull — On-Device Photo Culling for Apple Silicon</title>
+  <meta name="description" content="Batch-score, deduplicate, and rank a folder of photos in seconds — entirely on your Mac, using Apple's Neural Engine. No cloud, no subscription.">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --black: #0a0a0a;
+      --off-white: #f5f4f0;
+      --warm-gray: #8a8680;
+      --accent: #c8a96a;
+      --accent-light: #f0e6cc;
+      --border: #e0ddd8;
+      --code-bg: #1a1a1a;
+      --radius: 12px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+      background: var(--off-white);
+      color: var(--black);
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 48px;
+      background: rgba(245,244,240,0.88);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      font-size: 17px; font-weight: 700; letter-spacing: -0.5px;
+      color: var(--black); text-decoration: none;
+    }
+    .nav-logo span { color: var(--accent); }
+    nav a {
+      font-size: 14px; color: var(--warm-gray); text-decoration: none;
+      transition: color 0.15s;
+    }
+    nav a:hover { color: var(--black); }
+    .nav-links { display: flex; gap: 28px; align-items: center; }
+    .nav-cta {
+      background: var(--black); color: #fff !important;
+      padding: 8px 18px; border-radius: 8px; font-weight: 600;
+      transition: opacity 0.15s !important;
+    }
+    .nav-cta:hover { opacity: 0.82; }
+
+    /* ── HERO ── */
+    .hero {
+      max-width: 900px; margin: 0 auto;
+      padding: 100px 48px 80px;
+      text-align: center;
+    }
+    .hero-eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 13px; font-weight: 600; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--warm-gray);
+      background: #fff; border: 1px solid var(--border);
+      padding: 6px 14px; border-radius: 999px; margin-bottom: 32px;
+    }
+    .hero-eyebrow svg { width: 14px; height: 14px; fill: var(--accent); }
+    .hero h1 {
+      font-size: clamp(38px, 6vw, 68px);
+      font-weight: 800; letter-spacing: -2px; line-height: 1.06;
+      margin-bottom: 24px;
+    }
+    .hero h1 em { font-style: normal; color: var(--accent); }
+    .hero-sub {
+      font-size: clamp(17px, 2.2vw, 21px); color: var(--warm-gray);
+      max-width: 620px; margin: 0 auto 48px; line-height: 1.5;
+    }
+    .hero-actions { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--black); color: #fff;
+      padding: 14px 28px; border-radius: 10px;
+      font-size: 16px; font-weight: 600; text-decoration: none;
+      transition: opacity 0.15s;
+    }
+    .btn-primary:hover { opacity: 0.82; }
+    .btn-secondary {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: #fff; color: var(--black);
+      padding: 14px 28px; border-radius: 10px;
+      font-size: 16px; font-weight: 600; text-decoration: none;
+      border: 1px solid var(--border);
+      transition: border-color 0.15s;
+    }
+    .btn-secondary:hover { border-color: var(--black); }
+
+    /* ── STAT BAND ── */
+    .stat-band {
+      background: var(--black); color: #fff;
+      padding: 56px 48px;
+    }
+    .stat-band-inner {
+      max-width: 900px; margin: 0 auto;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 48px; text-align: center;
+    }
+    .stat-value {
+      font-size: 52px; font-weight: 800; letter-spacing: -2px;
+      color: var(--accent); line-height: 1;
+    }
+    .stat-label {
+      font-size: 14px; color: rgba(255,255,255,0.55); margin-top: 8px;
+      line-height: 1.4;
+    }
+
+    /* ── SECTIONS ── */
+    section { padding: 96px 48px; }
+    .section-inner { max-width: 900px; margin: 0 auto; }
+    .section-label {
+      font-size: 12px; font-weight: 700; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 16px;
+    }
+    h2 {
+      font-size: clamp(28px, 4vw, 42px); font-weight: 800;
+      letter-spacing: -1.2px; line-height: 1.1; margin-bottom: 16px;
+    }
+    .section-sub {
+      font-size: 18px; color: var(--warm-gray); max-width: 600px; line-height: 1.5;
+    }
+
+    /* ── HOW IT WORKS ── */
+    .how-it-works { background: #fff; }
+    .steps {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 32px; margin-top: 56px;
+    }
+    .step {
+      padding: 32px; background: var(--off-white);
+      border-radius: var(--radius); border: 1px solid var(--border);
+    }
+    .step-num {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: var(--accent-light); color: #92711a;
+      font-weight: 800; font-size: 15px;
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 20px;
+    }
+    .step h3 { font-size: 17px; font-weight: 700; margin-bottom: 8px; }
+    .step p { font-size: 14px; color: var(--warm-gray); line-height: 1.55; }
+
+    /* ── FEATURES ── */
+    .features-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 24px; margin-top: 56px;
+    }
+    .feature-card {
+      padding: 28px; background: #fff;
+      border: 1px solid var(--border); border-radius: var(--radius);
+    }
+    .feature-icon {
+      font-size: 28px; margin-bottom: 16px; display: block;
+    }
+    .feature-card h3 { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
+    .feature-card p { font-size: 14px; color: var(--warm-gray); line-height: 1.55; }
+
+    /* ── PERFORMANCE ── */
+    .perf { background: var(--black); color: #fff; }
+    .perf h2 { color: #fff; }
+    .perf .section-sub { color: rgba(255,255,255,0.55); }
+    .perf-table {
+      width: 100%; border-collapse: collapse; margin-top: 48px;
+      font-size: 15px;
+    }
+    .perf-table th {
+      text-align: left; padding: 12px 0; font-size: 12px;
+      font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+      color: rgba(255,255,255,0.4); border-bottom: 1px solid rgba(255,255,255,0.12);
+    }
+    .perf-table td {
+      padding: 14px 0; border-bottom: 1px solid rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.85);
+    }
+    .perf-table td:last-child { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    /* ── CODE BLOCK ── */
+    .code-section { background: #fff; }
+    pre {
+      background: var(--code-bg); color: #e2e8f0;
+      padding: 28px 32px; border-radius: var(--radius);
+      font-size: 14px; line-height: 1.7; overflow-x: auto;
+      margin-top: 40px;
+    }
+    .comment { color: #718096; }
+    .cmd { color: var(--accent); }
+
+    /* ── PRIVACY BAND ── */
+    .privacy-band {
+      background: var(--accent-light);
+      border-top: 1px solid #e0c990; border-bottom: 1px solid #e0c990;
+    }
+    .privacy-band .section-inner {
+      display: flex; align-items: center; gap: 48px; flex-wrap: wrap;
+    }
+    .privacy-text { flex: 1; min-width: 260px; }
+    .privacy-text h2 { font-size: 28px; margin-bottom: 12px; }
+    .privacy-text p { color: var(--warm-gray); font-size: 16px; line-height: 1.55; }
+    .privacy-points { display: flex; flex-direction: column; gap: 12px; }
+    .privacy-point {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 15px; font-weight: 600;
+    }
+    .privacy-point::before { content: '✓'; color: #92711a; font-weight: 800; }
+
+    /* ── CTA ── */
+    .cta-section { text-align: center; }
+    .cta-section h2 { margin-bottom: 16px; }
+    .cta-section p { color: var(--warm-gray); font-size: 18px; margin-bottom: 40px; }
+    .cta-section .btn-secondary { margin-left: 12px; }
+
+    /* ── FOOTER ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 32px 48px;
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 16px;
+    }
+    footer p { font-size: 13px; color: var(--warm-gray); }
+    footer a { color: var(--warm-gray); text-decoration: none; }
+    footer a:hover { color: var(--black); }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 680px) {
+      nav { padding: 14px 20px; }
+      .nav-links { gap: 12px; }
+      .nav-links a:not(.nav-cta) { display: none; }
+      .hero { padding: 64px 20px 56px; }
+      section { padding: 64px 20px; }
+      .stat-band { padding: 48px 20px; }
+      footer { padding: 24px 20px; }
+      pre { padding: 20px; font-size: 13px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a href="#" class="nav-logo">Vision<span>Cull</span></a>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#how-it-works">How it works</a>
+    <a href="#performance">Performance</a>
+    <a href="https://github.com/echase/VisionCull" class="nav-cta">GitHub →</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-eyebrow">
+    <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="8"/></svg>
+    Apple Silicon · Neural Engine · Local-First
+  </div>
+  <h1>Cull 500 photos in <em>73 seconds</em>.<br>Zero cloud. Zero subscription.</h1>
+  <p class="hero-sub">VisionCull batch-scores, deduplicates, and ranks a folder of images using Apple's Vision framework — running entirely on the Neural Engine. Your photos never leave your Mac.</p>
+  <div class="hero-actions">
+    <a href="https://github.com/echase/VisionCull" class="btn-primary">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+      View on GitHub
+    </a>
+    <a href="docs/case-study.md" class="btn-secondary">Read the case study →</a>
+  </div>
+</div>
+
+<!-- STAT BAND -->
+<div class="stat-band">
+  <div class="stat-band-inner">
+    <div>
+      <div class="stat-value">73s</div>
+      <div class="stat-label">wall time for 483 images<br>on M1 Pro</div>
+    </div>
+    <div>
+      <div class="stat-value">88%</div>
+      <div class="stat-label">subject detection rate<br>foreground lifting</div>
+    </div>
+    <div>
+      <div class="stat-value">31ms</div>
+      <div class="stat-label">per-image steady state<br>4 Vision requests warm</div>
+    </div>
+    <div>
+      <div class="stat-value">$0</div>
+      <div class="stat-label">per image<br>no cloud APIs</div>
+    </div>
+  </div>
+</div>
+
+<!-- HOW IT WORKS -->
+<section class="how-it-works" id="how-it-works">
+  <div class="section-inner">
+    <div class="section-label">How it works</div>
+    <h2>One command. Fully ranked selects.</h2>
+    <p class="section-sub">VisionCull runs the full pipeline locally — no model downloads, no API keys, no internet connection required.</p>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>Scan &amp; score</h3>
+        <p>Every image is scored for aesthetic quality using <code>VNCalculateImageAestheticsScoresRequest</code> on the Neural Engine. Composition, lighting, visual appeal — evaluated in ~10ms per image on warm hardware.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>Cluster duplicates</h3>
+        <p>Feature vectors from <code>VNGenerateImageFeaturePrintRequest</code> are compared via cosine distance. Near-identical shots are grouped; only the highest-scoring image from each cluster advances.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>Rank &amp; select</h3>
+        <p>Surviving images are ranked by aesthetic score, filtered by classification labels if requested, and the top N are copied to your output folder — named and ranked.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="section-inner">
+    <div class="section-label">Features</div>
+    <h2>Everything the Neural Engine already knows.</h2>
+    <p class="section-sub">Built on Vision framework APIs that ship with macOS — no model downloads, no third-party dependencies beyond three pip packages.</p>
+    <div class="features-grid">
+      <div class="feature-card">
+        <span class="feature-icon">✦</span>
+        <h3>Aesthetic scoring</h3>
+        <p>Apple's <code>VNCalculateImageAestheticsScoresRequest</code> scores composition, lighting, and visual appeal. Utility images (screenshots, documents) are automatically flagged and filtered.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">⊗</span>
+        <h3>Duplicate detection</h3>
+        <p>Feature embedding similarity clusters near-identical shots. Configurable cosine similarity threshold (default 0.92). Best-scoring image from each cluster advances; others are logged as rejects.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">◈</span>
+        <h3>Scene classification</h3>
+        <p>1000+ label classification via <code>VNClassifyImageRequest</code>. Filter selects by label: <code>--tags flower,indoor,table</code>. Classification data is always in the report even without filtering.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">◉</span>
+        <h3>Subject-aware palettes</h3>
+        <p>Foreground instance masking extracts a subject color palette independent of the scene background. Two palettes per image: <code>subject_colors</code> (arrangement, product) and <code>dominant_colors</code> (full frame).</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">▦</span>
+        <h3>HTML contact sheet</h3>
+        <p>Generate an interactive grid of your selects with score bars, hover-revealed palettes, classification labels, and a lightbox with keyboard navigation. Self-contained single HTML file.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">◎</span>
+        <h3>JSON report</h3>
+        <p>Full structured output: aesthetic scores, quality flags, classification labels with confidence, color palettes, duplicate cluster IDs, select/reject reasoning. Designed for downstream processing.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PERFORMANCE -->
+<section class="perf" id="performance">
+  <div class="section-inner">
+    <div class="section-label" style="color: rgba(200,169,106,0.7)">Performance</div>
+    <h2>M1 Pro benchmarks, real corpus.</h2>
+    <p class="section-sub">Numbers from a production run on 483 floristry images. Not synthetic benchmarks.</p>
+    <table class="perf-table">
+      <thead>
+        <tr><th>Metric</th><th>Value</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Corpus size</td><td>483 images</td></tr>
+        <tr><td>Total wall time</td><td>~73 seconds</td></tr>
+        <tr><td>Analyze phase</td><td>54.6s</td></tr>
+        <tr><td>Color extraction phase</td><td>17.8s</td></tr>
+        <tr><td>Aesthetic scoring (warm)</td><td>~10ms / image</td></tr>
+        <tr><td>Classification (warm)</td><td>~10ms / image</td></tr>
+        <tr><td>Feature print (warm)</td><td>~10ms / image</td></tr>
+        <tr><td>Foreground mask (warm)</td><td>~23ms / image</td></tr>
+        <tr><td>4-request batch (warm)</td><td>~31ms / image</td></tr>
+        <tr><td>Peak RSS</td><td>~3 GB (stable plateau)</td></tr>
+        <tr><td>Subject detection rate</td><td>88% (425 / 483)</td></tr>
+        <tr><td>Duplicate clusters found</td><td>47 clusters, 189 images</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- CODE -->
+<section class="code-section">
+  <div class="section-inner">
+    <div class="section-label">Install &amp; Run</div>
+    <h2>Three pip packages. That's it.</h2>
+    <p class="section-sub">No model downloads. No API keys. No Docker. Requires macOS 15+ on Apple Silicon.</p>
+<pre><span class="comment"># Clone and install</span>
+git clone https://github.com/echase/VisionCull.git
+cd VisionCull
+python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements.txt
+
+<span class="comment"># Basic run — score and copy top 40 selects</span>
+<span class="cmd">python3 visioncull.py</span> ~/Photos/shoot/ --output ~/selects/
+
+<span class="comment"># Full pipeline — deduplicate, classify, subject analysis</span>
+<span class="cmd">python3 visioncull.py</span> ~/Photos/shoot/ \
+  --output ~/selects/ \
+  --selects 40 \
+  --duplicates --threshold 0.92 \
+  --subject \
+  --report report.json \
+  --rank-prefix
+
+<span class="comment"># Generate HTML contact sheet from report</span>
+<span class="cmd">python3 contact_sheet.py</span> --report report.json</pre>
+  </div>
+</section>
+
+<!-- PRIVACY -->
+<section class="privacy-band">
+  <div class="section-inner">
+    <div class="privacy-text">
+      <h2>Your images stay on your machine.</h2>
+      <p>Every analysis runs on the Neural Engine inside your Mac. No image data is sent to any server. No account required. No usage logging. When the script finishes, nothing has left your local filesystem.</p>
+    </div>
+    <div class="privacy-points">
+      <div class="privacy-point">No cloud API calls</div>
+      <div class="privacy-point">No account or API key</div>
+      <div class="privacy-point">No model downloads</div>
+      <div class="privacy-point">No usage logging</div>
+      <div class="privacy-point">MIT licensed</div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section">
+  <div class="section-inner">
+    <div class="section-label">Open Source · MIT</div>
+    <h2>Ready to cull faster?</h2>
+    <p>Three pip packages, one command. Works on any folder of photos.</p>
+    <a href="https://github.com/echase/VisionCull" class="btn-primary">
+      Get VisionCull on GitHub
+    </a>
+    <a href="docs/case-study.md" class="btn-secondary">Read the build story</a>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <p>VisionCull · Built by <a href="https://wellspringdigital.com">Wellspring Digital</a> · MIT License</p>
+  <p><a href="https://github.com/echase/VisionCull">GitHub</a> · <a href="docs/case-study.md">Case study</a> · <a href="docs/pyobjc_probes.md">pyobjc notes</a></p>
+</footer>
+
+</body>
+</html>

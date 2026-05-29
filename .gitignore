@@ -1,2 +1,9 @@
 .venv/
 __pycache__/
+*.json
+thumbs/
+contact_sheet*.html
+.DS_Store
+output/
+selects/
+tests/phase_a_corpus.txt
