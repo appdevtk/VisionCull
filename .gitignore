@@ -7,3 +7,7 @@ contact_sheet*.html
 output/
 selects/
 tests/phase_a_corpus.txt
+
+.build/
+.swiftpm/
+dist/

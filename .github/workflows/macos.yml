@@ -1,0 +1,36 @@
+name: macOS App and CLI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          uname -m
+      - name: Test core workflow and local Vision
+        run: swift test
+      - name: Build app bundle and CLI
+        run: Scripts/build-macos.sh
+      - name: Scan, preview and export with the packaged CLI
+        run: Scripts/smoke-cli.sh "$PWD/dist/visioncull"
+      - name: Package CLI
+        run: ditto -c -k --keepParent dist/visioncull dist/visioncull-cli-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VisionCull-macOS
+          path: |
+            dist/VisionCull-macOS.zip
+            dist/visioncull-cli-macOS.zip
+          if-no-files-found: error

@@ -1,238 +1,58 @@
 # VisionCull
 
-**Cull 500 photos in ~73 seconds, fully on-device on Apple Silicon.**
+VisionCull is a native macOS app and Swift CLI for reviewing and tagging photos locally. Apple Vision proposes motifs, a category, and a short caption assembled from its recognized labels. You can edit those suggestions, approve a batch, and export XMP sidecars while keeping the original image files intact.
 
-![Python 3.14+](https://img.shields.io/badge/Python-3.14%2B-blue)
-![macOS 15+](https://img.shields.io/badge/macOS-15%2B-lightgrey)
-![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-Neural_Engine-black)
-![License: MIT](https://img.shields.io/badge/License-MIT-green)
+## Build and run
 
-VisionCull is a CLI tool that batch-scores, classifies, clusters, and ranks a folder of images using Apple's Vision framework — running entirely on the Neural Engine. No cloud, no subscription, no third-party ML models. Everything stays on your machine.
+Requires macOS 15+ and Xcode 16+ on a Mac. GitHub Actions builds and tests both products in the [macOS workflow](.github/workflows/macos.yml). The workflow uploads the app and CLI as ZIP artifacts. For a local development build:
 
----
-
-## Why VisionCull?
-
-Manually culling 500 photos takes 30–45 minutes of scrolling. Aftershoot and similar tools send your images to the cloud and charge a subscription. Apple's Vision framework has been doing production-quality aesthetic scoring, duplicate detection, and scene classification on every M-series Mac for years — VisionCull exposes that capability as a fast, private CLI.
-
-- **Private** — your images never leave your machine
-- **Fast** — 483 images processed in ~73 seconds on M1 Pro
-- **Free** — no subscription, no API keys, no model downloads
-- **Accurate** — Neural Engine aesthetic scoring + subject-aware dual-palette analysis
-
----
-
-## What It Does
-
-VisionCull runs up to four Vision framework requests per image:
-
-| Analysis | API | Output |
-|---|---|---|
-| **Aesthetic scoring** | `VNCalculateImageAestheticsScoresRequest` | 0–1 score, quality flags (utility, blurry, screenshot) |
-| **Scene classification** | `VNClassifyImageRequest` | Top labels with confidence (flower, indoor, person, etc.) |
-| **Duplicate detection** | `VNGenerateImageFeaturePrintRequest` | Feature vectors → cosine-distance clustering |
-| **Subject lifting** | `VNGenerateForegroundInstanceMaskRequest` | Foreground mask → subject color palette |
-
-Results are written to a JSON report. Selects are copied to an output directory. An optional HTML contact sheet gives you a visual grid with scores, palettes, and labels.
-
----
-
-## Requirements
-
-- macOS 15+ (Sequoia or later)
-- Apple Silicon Mac (M1 or newer) — Vision framework + Neural Engine
-- Python 3.12+
-
-> **Note:** `pyobjc-framework-Vision` requires macOS — this tool does not run on Linux or Windows.
-
----
-
-## Install
-
-```bash
-git clone https://github.com/echase/VisionCull.git
-cd VisionCull
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+```sh
+swift test
+Scripts/build-macos.sh
+open dist/VisionCull.app
+dist/visioncull --help
 ```
 
----
+The build is ad-hoc signed for development. Distribution to other Macs may require Developer ID signing and notarization.
 
-## Usage
+## Review photos
 
-```bash
-# Score and rank a folder, copy top 40 selects
-python3 visioncull.py ~/Photos/shoot/ --output ~/Photos/selects/
+1. Choose **Open → Folder** and select a directory. VisionCull scans supported images recursively. **Find Similar Photos** is an optional scan setting that adds Vision feature prints and a similar-photo strip to the review.
+2. Review the images in the sidebar. Edit motifs, category, caption, capture date, and GPS and use **Save Edits**. Existing EXIF, IPTC, XMP, and Apple Photos metadata can populate these fields. Capture dates without a timezone remain unzoned. Missing date and GPS are left blank.
+3. Mark the photos you reviewed and choose **Approve Marked**. Saving another edit clears an earlier approval.
+4. Choose **Export → XMP**. Export to a separate folder to keep the source folder untouched. Subfolders are preserved. **Save Review** keeps edits and approvals in a JSON file you can reopen.
 
-# With duplicate clustering (removes near-identical shots)
-python3 visioncull.py ~/Photos/shoot/ --output ~/selects/ --duplicates
+Existing, different XMP files are preserved. If they already exist or two inputs share a sidecar name, resolve the conflict or choose a fresh export location. The app rejects a reviewed file that changed before export. Review JSON files contain local file paths and may contain GPS.
 
-# Filter by scene classification label
-python3 visioncull.py ~/Photos/shoot/ --tags flower,indoor --selects 20
+The analysis cache is stored under `~/Library/Application Support/VisionCull`. A second scan of the same images reuses analysis for the same file revision and model settings. Metadata and sidecars are read again, even on a cache hit.
 
-# Full pipeline: deduplicate, classify, subject analysis, ranked report
-python3 visioncull.py ~/Photos/shoot/ \
-  --output ~/Photos/selects/ \
-  --selects 40 \
-  --duplicates --threshold 0.92 \
-  --subject \
-  --tags flower,table,outdoor \
-  --report report.json \
-  --rank-prefix
+### Apple Photos and iCloud
 
-# Enrich selects with Claude Vision descriptions (requires ANTHROPIC_API_KEY)
-python3 visioncull.py ~/Photos/shoot/ --output ~/selects/ --enrich
+Use **Open → Apple Photos** to read the most recent photos available to the app in the system photo library. PhotoKit calls the required permission “read/write.” VisionCull uses it to fetch assets and copy original still-image resources to its own cache. XMP for these photos always goes to a separate export folder.
+
+Enable **Download iCloud-only originals** to let PhotoKit fetch originals that are stored in iCloud. This can use network data and local disk space. With downloads disabled, unavailable originals appear in scan issues. Apple Photos originals copied into the local cache remain available to saved reviews until that cache is removed. Live Photo video companions and alternate RAW resources are outside this workflow.
+
+Use the packaged app or CLI so macOS can display the Photos permission prompt. The packaged CLI supports `photos --limit N` and the optional `--icloud` flag.
+
+### Immich
+
+Choose an approved photo and explicitly select **Update Existing** or **Upload New**. Enter the server URL and an API key with the permissions needed for the action. The app keeps the key in memory for the current action. The CLI gets it from `IMMICH_API_KEY`.
+
+- **Update existing:** Supply the exact Immich asset UUID. VisionCull verifies its checksum against the local original before updating metadata. If the checksum differs, verify the original in Immich before trying again.
+- **Upload new:** Supply a target album UUID. VisionCull checks for an existing checksum before sending the image. A duplicate result asks you to verify the returned asset ID and then explicitly choose Update. If an upload succeeds and a later step fails, the error includes the new asset ID so you can finish with Update and the album UUID.
+- VisionCull adds confirmed motifs and category as Immich tags and leaves other tags intact. It omits blank metadata. To send an edited capture time to Immich, include an explicit timezone offset. The server URL must use HTTPS, with HTTP accepted on loopback for local testing.
+
+### CLI example
+
+```sh
+dist/visioncull scan ~/Pictures/Test --duplicates --review review.json
+dist/visioncull preview review.json
+dist/visioncull edit review.json 'day-1/IMG_001.jpg' \
+  --subjects 'garden,flowers' --category Nature --description 'Flowers beside a path'
+dist/visioncull approve review.json 'day-1/IMG_001.jpg'
+dist/visioncull export review.json --output ./xmp-export
 ```
 
-### All flags
+Use `Scripts/smoke-cli.sh "$PWD/dist/visioncull"` to run a disposable local folder through scan, cache reuse, preview, approval, and XMP export. On Linux, the smoke script uses `--metadata-only`. Apple Vision, the native UI, PhotoKit, and Immich checksumming use the macOS build.
 
-| Flag | Default | Description |
-|---|---|---|
-| `input_dir` | *(required)* | Directory of images to score |
-| `--output PATH` | — | Copy selects here |
-| `--selects N` | `40` | Number of selects to pick |
-| `--duplicates` | off | Enable duplicate clustering |
-| `--threshold FLOAT` | `0.92` | Cosine similarity threshold for duplicates |
-| `--report PATH` | — | Write full JSON report to this path |
-| `--rank-prefix` | off | Prefix selects with rank: `01_IMG_4521.jpg` |
-| `--min-score FLOAT` | `0.0` | Reject images below this aesthetic score |
-| `--subject` | off | Foreground subject lifting (dual-palette analysis) |
-| `--tags LABELS` | — | Comma-separated labels to filter selects |
-| `--enrich` | off | Enrich selects with Claude Vision descriptions |
-| `--enrich-all` | off | Enrich all processed images |
-
----
-
-## Contact Sheet
-
-Generate an interactive HTML contact sheet from any report:
-
-```bash
-python3 contact_sheet.py --report report.json --output contact_sheet.html
-```
-
-The contact sheet renders thumbnails in ranked order with aesthetic score bars, subject/scene color palettes, classification labels, and a lightbox with full EXIF detail.
-
----
-
-## Performance (M1 Pro, 16GB)
-
-| Metric | Value |
-|---|---|
-| Corpus size | 483 images |
-| Total wall time | ~73 seconds |
-| Aesthetic score request (warm) | ~10ms/image |
-| Classification request (warm) | ~10ms/image |
-| Feature print request (warm) | ~10ms/image |
-| Foreground mask request (warm) | ~23ms/image |
-| 4-request batch (warm) | ~31ms/image steady state |
-| Peak RSS | ~3 GB (plateaus and holds flat) |
-| Subject detection rate | 88% (425/483 images) |
-
-Memory is bounded via per-iteration `objc.autorelease_pool()` and periodic `gc.collect()`. The RSS plateau holds steady through large corpora.
-
----
-
-## Architecture
-
-```
-Input folder
-    │
-    ▼
-scan_images()           ← find .jpg/.jpeg/.png/.heic/.tiff
-    │
-    ▼
-analyze_image()         ← per-image: aesthetic + classify + featureprint + optional mask
-    │                      runs in objc.autorelease_pool() per iteration
-    ▼
-extract_dominant_colors()  ← Pillow-based dominant color extraction
-    │
-    ▼  (if --subject)
-_extract_subject_colors()  ← masked-image → CIContext → CGImage → numpy → HSL naming
-    │
-    ▼  (if --duplicates)
-cluster_duplicates()    ← cosine distance on feature vectors → clusters, best-per-cluster
-    │
-    ▼
-rank_and_select()       ← sort by aesthetic score, apply filters, pick top N
-    │
-    ├── generate_report()   → JSON report
-    ├── copy_selects()      → output directory
-    └── contact_sheet.py    → HTML grid (separate command)
-```
-
-### Dual-palette output
-
-When `--subject` is enabled, each image gets two color palettes:
-
-- **`subject_colors`** — extracted from the foreground subject (arrangement, product, etc.) via `VNGenerateForegroundInstanceMaskRequest` → masked render → alpha-channel filtering
-- **`dominant_colors`** — full-frame dominant colors via Pillow
-
-Both palettes include HSL-derived color names and coverage percentages.
-
----
-
-## Report format
-
-```json
-{
-  "source": "/path/to/photos",
-  "total_images": 483,
-  "processed": 483,
-  "processing_time_seconds": 54.6,
-  "selects": ["IMG_4521.jpg", "IMG_4087.jpg"],
-  "images": [
-    {
-      "filename": "IMG_4521.jpg",
-      "aesthetic_score": 0.87,
-      "classifications": [
-        {"label": "flower", "confidence": 0.94},
-        {"label": "indoor", "confidence": 0.89}
-      ],
-      "subject_lift_status": "success",
-      "subject_colors": [
-        {"hex": "#F5E6D3", "name": "peach", "coverage_pct": 34.1}
-      ],
-      "dominant_colors": [
-        {"hex": "#2D4A3E", "name": "forest green", "coverage_pct": 28.7}
-      ],
-      "duplicate_cluster": 3,
-      "cluster_rank": 1,
-      "recommended": true,
-      "recommendation_reason": "High aesthetic score, best in duplicate cluster"
-    }
-  ]
-}
-```
-
----
-
-## pyobjc binding notes
-
-See [`docs/pyobjc_probes.md`](docs/pyobjc_probes.md) for documented Vision framework binding patterns, including:
-
-- `computeDistance` returning `(True, None)` — use numpy cosine on raw vectors instead
-- `generateScaledMaskForImage` extraction failures — use `generateMaskedImageOfInstances` instead  
-- `CVPixelBufferGetBaseAddress` returning `objc.varlist` — go CIContext → CGImage → numpy
-- Autorelease pool requirement for per-iteration loops
-
----
-
-## Conduit integration
-
-VisionCull's scoring and classification functions are designed to be exposable as [Conduit](https://github.com/echase) co-yield endpoints — an agent sends a batch of image paths, the local tool returns scored results. The Vision framework calls are the exact kind of task co-yield was designed for: bounded, compute-local, latency-sensitive, privacy-preserving.
-
-Standalone first. Conduit integration is Phase 4.
-
----
-
-## Case study
-
-See [`docs/case-study.md`](docs/case-study.md) for a full writeup on how VisionCull was built, the hard-won pyobjc patterns, and real performance data from a production photo curation run.
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+The [original Python pipeline](docs/legacy-python.md) remains available for its HTML contact sheet, palette analysis, and CLI compatibility. [Project background and original benchmark](docs/case-study.md).
