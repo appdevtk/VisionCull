@@ -9,16 +9,26 @@ import CryptoKit
 public final class ImmichClient: Sendable {
     private let endpoint: URL
     private let key: String
-    private let session: URLSession
+    private let load: @Sendable (URLRequest) async throws -> (Data, URLResponse)
+    private let sendFile: @Sendable (URLRequest, URL) async throws -> (Data, URLResponse)
     private let fingerprint: @Sendable (URL) throws -> String
 
     public convenience init(server: URL, apiKey: String) throws {
-        try self.init(server: server, apiKey: apiKey, session: URLSession(
-            configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil
-        ), fingerprint: { try Self.checksum($0) })
+        let session = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
+        try self.init(
+            server: server, apiKey: apiKey,
+            load: { try await session.data(for: $0) },
+            sendFile: { try await session.upload(for: $0, fromFile: $1) },
+            fingerprint: { try Self.checksum($0) }
+        )
     }
 
-    init(server: URL, apiKey: String, session: URLSession, fingerprint: @escaping @Sendable (URL) throws -> String) throws {
+    init(
+        server: URL, apiKey: String,
+        load: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse),
+        sendFile: @escaping @Sendable (URLRequest, URL) async throws -> (Data, URLResponse),
+        fingerprint: @escaping @Sendable (URL) throws -> String
+    ) throws {
         let host = server.host ?? ""
         let loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host.lowercased())
         let scheme = server.scheme?.lowercased()
@@ -30,7 +40,8 @@ public final class ImmichClient: Sendable {
         guard headersAreSafe else { throw WorkflowError.message("Enter a valid Immich API key.") }
         endpoint = server.lastPathComponent == "api" ? server : server.appendingPathComponent("api")
         key = apiKey
-        self.session = session
+        self.load = load
+        self.sendFile = sendFile
         self.fingerprint = fingerprint
     }
 
@@ -77,7 +88,7 @@ public final class ImmichClient: Sendable {
         var request = request("POST", path: "assets")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.setValue(checksum, forHTTPHeaderField: "x-immich-checksum")
-        let response = try await session.upload(for: request, fromFile: multipart)
+        let response = try await sendFile(request, multipart)
         let receipt: UploadReceipt = try decode(response, request: request)
         guard receipt.status == "created" else {
             throw WorkflowError.message("Immich returned \(receipt.status) for asset \(receipt.id). Verify that asset before choosing Update.")
@@ -121,7 +132,7 @@ public final class ImmichClient: Sendable {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        return try decode(try await session.data(for: request), request: request)
+        return try decode(try await load(request), request: request)
     }
 
     private func decode<T: Decodable>(_ result: (Data, URLResponse), request: URLRequest) throws -> T {

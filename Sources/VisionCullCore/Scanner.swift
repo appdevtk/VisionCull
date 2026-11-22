@@ -1,4 +1,9 @@
 import Foundation
+#if os(macOS)
+import Darwin
+#else
+import Glibc
+#endif
 
 public protocol PhotoAnalyzer: Sendable {
     var cacheVersion: String { get }
@@ -39,7 +44,9 @@ public struct PhotoScanner: Sendable {
     }
 
     public func scan(folder: URL) throws -> Review {
-        let root = folder.standardizedFileURL.resolvingSymlinksInPath()
+        let rootPath = try Self.canonicalPath(folder)
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+        let prefix = rootPath == "/" ? "/" : rootPath + "/"
         guard try root.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
             throw WorkflowError.message("Choose a readable photo folder.")
         }
@@ -54,21 +61,26 @@ public struct PhotoScanner: Sendable {
             }
         ) else { throw WorkflowError.message("Unable to enumerate \(root.path).") }
 
-        let excluded = cacheRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        let excluded = try? Self.canonicalPath(cacheRoot)
         var inputs = [PhotoInput]()
         for case let file as URL in files {
             try Task.checkCancellation()
-            if file.path == excluded {
-                files.skipDescendants()
-                continue
-            }
             do {
+                if file.lastPathComponent == cacheRoot.lastPathComponent,
+                   let excluded, try Self.canonicalPath(file) == excluded {
+                    files.skipDescendants()
+                    continue
+                }
                 let values = try file.resourceValues(forKeys: Set(keys))
                 if values.isSymbolicLink == true {
                     files.skipDescendants()
                 } else if values.isRegularFile == true, Self.imageExtensions.contains(file.pathExtension.lowercased()) {
-                    let relative = file.pathComponents.dropFirst(root.pathComponents.count).joined(separator: "/")
-                    inputs.append(PhotoInput(id: file.path, file: file, relativePath: relative))
+                    let path = try Self.canonicalPath(file)
+                    guard path.hasPrefix(prefix) else {
+                        throw WorkflowError.message("Image is outside the scanned folder.")
+                    }
+                    let relative = String(path.dropFirst(prefix.count))
+                    inputs.append(PhotoInput(id: path, file: URL(fileURLWithPath: path), relativePath: relative))
                 }
             } catch {
                 issues.append(ScanIssue(path: file.path, message: error.localizedDescription))
@@ -123,6 +135,14 @@ public struct PhotoScanner: Sendable {
             }
         }
         return Review(photos: entries, issues: issues, analyzed: analyzed, reused: reused)
+    }
+
+    private static func canonicalPath(_ url: URL) throws -> String {
+        guard let buffer = url.withUnsafeFileSystemRepresentation({ path in path.flatMap { realpath($0, nil) } }) else {
+            throw WorkflowError.message("Cannot resolve the local path: \(url.path)")
+        }
+        defer { free(buffer) }
+        return FileManager.default.string(withFileSystemRepresentation: buffer, length: strlen(buffer))
     }
 
     private struct CacheRecord: Codable {

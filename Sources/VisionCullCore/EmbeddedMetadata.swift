@@ -50,7 +50,7 @@ enum EmbeddedMetadata {
         let stem = file.deletingPathExtension().lastPathComponent.lowercased()
         let siblings = try manager.contentsOfDirectory(at: file.deletingLastPathComponent(), includingPropertiesForKeys: nil)
         let ambiguous = siblings.contains {
-            $0.path != file.path && PhotoScanner.imageExtensions.contains($0.pathExtension.lowercased())
+            $0.lastPathComponent != file.lastPathComponent && PhotoScanner.imageExtensions.contains($0.pathExtension.lowercased())
                 && $0.deletingPathExtension().lastPathComponent.lowercased() == stem
         }
         return ambiguous ? nil : standard

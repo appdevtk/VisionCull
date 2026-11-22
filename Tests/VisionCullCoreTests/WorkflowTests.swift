@@ -1,5 +1,9 @@
 import Foundation
 import XCTest
+#if os(macOS)
+import ImageIO
+import UniformTypeIdentifiers
+#endif
 @testable import VisionCullCore
 
 final class WorkflowTests: XCTestCase {
@@ -19,8 +23,9 @@ final class WorkflowTests: XCTestCase {
         try XMP.document(for: prior).write(to: nested.appendingPathComponent("first.xmp"))
         let scanner = PhotoScanner(cacheRoot: root.appendingPathComponent("cache"), analyzer: FixedAnalyzer())
         var review = try scanner.scan(folder: source)
-        XCTAssertTrue(review.issues.isEmpty)
+        XCTAssertTrue(review.issues.isEmpty, "\(review.issues)")
         XCTAssertEqual(review.photos.map(\.relativePath), ["nested/first.png", "second.png"])
+        guard review.photos.count == 2 else { return }
         XCTAssertEqual(review.analyzed, 2)
         XCTAssertEqual(review.photos[0].metadata.subjects, ["Original", "garden"])
         XCTAssertEqual(review.photos[0].metadata.capturedAt, prior.capturedAt)
@@ -92,6 +97,27 @@ final class WorkflowTests: XCTestCase {
         let result = try LocalVisionAnalyzer(includeDuplicates: true).analyze(fixture)
         XCTAssertNotNil(result.aestheticScore)
         XCTAssertFalse(try XCTUnwrap(result.featurePrint).isEmpty)
+    }
+
+    func testImageIOReadsEmbeddedCaptureMetadata() throws {
+        let root = try temporary()
+        let photo = root.appendingPathComponent("original.jpg")
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(fixture as CFURL, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let writer = try XCTUnwrap(CGImageDestinationCreateWithURL(photo as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        let exif: [String: Any] = [kCGImagePropertyExifDateTimeOriginal as String: "2024:02:29 07:30:00"]
+        let gps: [String: Any] = [
+            kCGImagePropertyGPSLatitude as String: 48.25, kCGImagePropertyGPSLatitudeRef as String: "N",
+            kCGImagePropertyGPSLongitude as String: 16.5, kCGImagePropertyGPSLongitudeRef as String: "W"
+        ]
+        CGImageDestinationAddImage(writer, image, [
+            kCGImagePropertyExifDictionary as String: exif, kCGImagePropertyGPSDictionary as String: gps,
+        ] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(writer))
+        let metadata = try EmbeddedMetadata.read(PhotoInput(id: "image", file: photo, relativePath: "original.jpg"))
+        XCTAssertEqual(metadata.capturedAt, "2024-02-29T07:30:00")
+        XCTAssertEqual(metadata.latitude, 48.25)
+        XCTAssertEqual(metadata.longitude, -16.5)
     }
     #endif
 

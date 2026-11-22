@@ -87,7 +87,7 @@ public enum XMP {
                 )
                 let stem = photo.file.deletingPathExtension().lastPathComponent.precomposedStringWithCanonicalMapping.lowercased()
                 guard !siblings.contains(where: {
-                    $0.path != photo.file.path
+                    $0.lastPathComponent != photo.file.lastPathComponent
                         && PhotoScanner.imageExtensions.contains($0.pathExtension.lowercased())
                         && $0.deletingPathExtension().lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == stem
                 }) else {
