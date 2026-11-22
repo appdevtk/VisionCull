@@ -19,10 +19,15 @@ final class WorkflowTests: XCTestCase {
         try original.write(to: second)
         try FileManager.default.createSymbolicLink(at: source.appendingPathComponent("alias.png"), withDestinationURL: first)
 
+        let aliasedRoot = root.appendingPathComponent("selected-folder")
+        try FileManager.default.createSymbolicLink(at: aliasedRoot, withDestinationURL: source)
+        try FileManager.default.createSymbolicLink(
+            at: source.appendingPathComponent("out-of-tree"), withDestinationURL: fixture.deletingLastPathComponent()
+        )
         let prior = PhotoMetadata(subjects: ["Original"], capturedAt: "2025-03-22T10:20:30", latitude: -52.5, longitude: 13.25)
         try XMP.document(for: prior).write(to: nested.appendingPathComponent("first.xmp"))
         let scanner = PhotoScanner(cacheRoot: root.appendingPathComponent("cache"), analyzer: FixedAnalyzer())
-        var review = try scanner.scan(folder: source)
+        var review = try scanner.scan(folder: aliasedRoot)
         XCTAssertTrue(review.issues.isEmpty, "\(review.issues)")
         XCTAssertEqual(review.photos.map(\.relativePath), ["nested/first.png", "second.png"])
         guard review.photos.count == 2 else { return }

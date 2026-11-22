@@ -50,7 +50,7 @@ public struct PhotoScanner: Sendable {
         guard try root.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
             throw WorkflowError.message("Choose a readable photo folder.")
         }
-        let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
         var issues = [ScanIssue]()
         guard let files = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: keys,
@@ -66,15 +66,15 @@ public struct PhotoScanner: Sendable {
         for case let file as URL in files {
             try Task.checkCancellation()
             do {
-                if file.lastPathComponent == cacheRoot.lastPathComponent,
+                let values = try file.resourceValues(forKeys: Set(keys))
+                // The enumerator does not descend into symlinks. skipDescendants is for real directories.
+                if values.isSymbolicLink == true { continue }
+                if values.isDirectory == true, file.lastPathComponent == cacheRoot.lastPathComponent,
                    let excluded, try Self.canonicalPath(file) == excluded {
                     files.skipDescendants()
                     continue
                 }
-                let values = try file.resourceValues(forKeys: Set(keys))
-                if values.isSymbolicLink == true {
-                    files.skipDescendants()
-                } else if values.isRegularFile == true, Self.imageExtensions.contains(file.pathExtension.lowercased()) {
+                if values.isRegularFile == true, Self.imageExtensions.contains(file.pathExtension.lowercased()) {
                     let path = try Self.canonicalPath(file)
                     guard path.hasPrefix(prefix) else {
                         throw WorkflowError.message("Image is outside the scanned folder.")
