@@ -33,7 +33,10 @@ enum EmbeddedMetadata {
         if let library = input.libraryMetadata {
             apply(library, to: &metadata)
         } else if let sidecar = try sidecar(for: input.file) {
-            apply(try XMP.read(Data(contentsOf: sidecar)), to: &metadata)
+            let handle = try FileHandle(forReadingFrom: sidecar)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: 4 * 1024 * 1024 + 1) ?? Data()
+            apply(try XMP.read(data), to: &metadata)
         }
         return metadata
     }

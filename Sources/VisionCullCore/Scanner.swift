@@ -91,12 +91,16 @@ public struct PhotoScanner: Sendable {
             try Task.checkCancellation()
             do {
                 let revision = try FileRevision.read(input.file)
-                let file = cache.appendingPathComponent(Self.cacheKey(input.id) + ".json")
+                let version = analyzer.cacheVersion
+                let file = cache.appendingPathComponent(Self.cacheKey(input.id + "\n" + version) + ".json")
                 let previous = try? JSONDecoder().decode(CacheRecord.self, from: Data(contentsOf: file))
                 let existing = try EmbeddedMetadata.read(input)
                 let analysis: ImageAnalysis
                 if let previous, previous.id == input.id, previous.revision == revision,
-                   previous.version == analyzer.cacheVersion {
+                   previous.version == version {
+                    guard try FileRevision.read(input.file) == revision else {
+                        throw WorkflowError.message("Image changed during metadata inspection. Rescan it.")
+                    }
                     analysis = previous.analysis
                     reused += 1
                 } else {
@@ -104,7 +108,7 @@ public struct PhotoScanner: Sendable {
                     guard try FileRevision.read(input.file) == revision else {
                         throw WorkflowError.message("Image changed during analysis. Rescan it.")
                     }
-                    let record = CacheRecord(id: input.id, revision: revision, version: analyzer.cacheVersion, analysis: analysis)
+                    let record = CacheRecord(id: input.id, revision: revision, version: version, analysis: analysis)
                     try JSONEncoder().encode(record).write(to: file, options: .atomic)
                     analyzed += 1
                 }

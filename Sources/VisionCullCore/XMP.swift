@@ -30,10 +30,12 @@ public enum XMP {
               xmlns:dc="http://purl.org/dc/elements/1.1/"
               xmlns:exif="http://ns.adobe.com/exif/1.0/"
               xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+              xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
               xmlns:vc="https://visioncull.dev/ns/1.0/">
               \(keywords.isEmpty ? "" : "<dc:subject><rdf:Bag>\(keywords)</rdf:Bag></dc:subject>")
               \(description.isEmpty ? "" : "<dc:description><rdf:Alt><rdf:li xml:lang=\"x-default\">\(description)</rdf:li></rdf:Alt></dc:description>")
               \(category.isEmpty ? "" : "<vc:Category>\(category)</vc:Category>")
+              \(category.isEmpty ? "" : "<photoshop:SupplementalCategories><rdf:Bag><rdf:li>\(category)</rdf:li></rdf:Bag></photoshop:SupplementalCategories>")
               \(date.isEmpty ? "" : "<exif:DateTimeOriginal>\(date)</exif:DateTimeOriginal><xmp:CreateDate>\(date)</xmp:CreateDate>")
               \(gps)
             </rdf:Description>
@@ -44,6 +46,9 @@ public enum XMP {
     }
 
     public static func read(_ data: Data) throws -> PhotoMetadata {
+        guard data.count <= 4 * 1024 * 1024 else {
+            throw WorkflowError.message("XMP exceeded the 4 MiB metadata limit.")
+        }
         let parser = XMLParser(data: data)
         parser.shouldProcessNamespaces = true
         parser.shouldResolveExternalEntities = false
@@ -218,6 +223,14 @@ private final class XMPReader: NSObject, XMLParserDelegate {
         namespaces[prefix] = namespaceURI
     }
 
+    func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) {
+        parser.abortParsing()
+    }
+
+    func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) {
+        parser.abortParsing()
+    }
+
     func parser(_ parser: XMLParser, foundCharacters string: String) {
         if !stack.isEmpty { stack[stack.count - 1].text += string }
     }
@@ -233,6 +246,10 @@ private final class XMPReader: NSObject, XMLParserDelegate {
                       defaultLanguage || (!preferredDescription && metadata.description.isEmpty) {
                 metadata.description = text
                 preferredDescription = preferredDescription || defaultLanguage
+            } else if metadata.category.isEmpty, stack.contains(where: {
+                $0.namespace == "http://ns.adobe.com/photoshop/1.0/" && $0.name == "SupplementalCategories"
+            }) {
+                metadata.category = text
             }
         } else {
             store(text, name: name, namespace: value.namespace)

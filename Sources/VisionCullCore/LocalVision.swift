@@ -17,7 +17,7 @@ public struct LocalVisionAnalyzer: PhotoAnalyzer {
     public func analyze(_ file: URL) throws -> ImageAnalysis {
         #if os(macOS)
         return try autoreleasepool {
-            let handler = VNImageRequestHandler(url: file)
+            let handler = VNImageRequestHandler(url: file, options: [:])
             let classification = VNClassifyImageRequest()
             let aesthetic = VNCalculateImageAestheticsScoresRequest()
             let features = VNGenerateImageFeaturePrintRequest()

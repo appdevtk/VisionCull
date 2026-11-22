@@ -23,11 +23,39 @@ private enum ReviewFilter: String, CaseIterable {
     case similar = "Similar photos"
 }
 
+private struct MetadataDraft: Equatable {
+    var metadata: PhotoMetadata
+    var keywords: String
+    var latitude: String
+    var longitude: String
+
+    init(_ metadata: PhotoMetadata) {
+        self.metadata = metadata
+        keywords = metadata.subjects.joined(separator: ", ")
+        latitude = metadata.latitude.map { String($0) } ?? ""
+        longitude = metadata.longitude.map { String($0) } ?? ""
+    }
+
+    func value() throws -> PhotoMetadata {
+        var result = metadata
+        result.subjects = keywords.components(separatedBy: ",")
+        let lat = latitude.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lon = longitude.trimmingCharacters(in: .whitespacesAndNewlines)
+        result.latitude = lat.isEmpty ? nil : Double(lat)
+        result.longitude = lon.isEmpty ? nil : Double(lon)
+        if (!lat.isEmpty && result.latitude == nil) || (!lon.isEmpty && result.longitude == nil) {
+            throw WorkflowError.message("Enter decimal GPS coordinates, using a dot as the decimal separator.")
+        }
+        return try result.validated()
+    }
+}
+
 @MainActor
 private final class Workspace: ObservableObject {
     @Published var review: Review?
     @Published var selection: String?
     @Published var marked = Set<String>()
+    @Published var drafts: [String: MetadataDraft] = [:]
     @Published var matches: [String: [String]] = [:]
     @Published var activity: String?
     @Published var status = ""
@@ -36,6 +64,7 @@ private final class Workspace: ObservableObject {
     @Published var duplicates = false
     @Published var allowICloud = false
     @Published var photosLimit = 50
+    @Published var photosPage = 1
 
     func openFolder() {
         guard let url = chooseFolder("Scan Folder") else { return }
@@ -48,9 +77,10 @@ private final class Workspace: ObservableObject {
     func openPhotos() {
         let scanner = PhotoScanner(analyzer: LocalVisionAnalyzer(includeDuplicates: duplicates))
         let limit = photosLimit
+        let offset = (photosPage - 1) * limit
         let download = allowICloud
         load("Reading Apple Photos…", source: "Apple Photos") {
-            try await ApplePhotos.scan(scanner: scanner, limit: limit, allowICloud: download)
+            try await ApplePhotos.scan(scanner: scanner, limit: limit, offset: offset, allowICloud: download)
         }
     }
 
@@ -63,7 +93,7 @@ private final class Workspace: ObservableObject {
     }
 
     func saveReview() {
-        guard let review else { return }
+        guard let review, checkForDrafts() else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = "VisionCull Review.json"
@@ -75,7 +105,7 @@ private final class Workspace: ObservableObject {
         }
     }
 
-    func apply(_ metadata: PhotoMetadata, to id: String) throws -> PhotoEntry {
+    func apply(_ metadata: PhotoMetadata, to id: String) throws {
         guard var review, let index = review.photos.firstIndex(where: { $0.id == id }) else {
             throw WorkflowError.message("This photo is no longer in the review.")
         }
@@ -86,7 +116,7 @@ private final class Workspace: ObservableObject {
         }
         self.review = review
         status = "Saved edits for \(review.photos[index].file.lastPathComponent)."
-        return review.photos[index]
+        drafts.removeValue(forKey: id)
     }
 
     func mark(_ id: String, enabled: Bool) {
@@ -94,7 +124,7 @@ private final class Workspace: ObservableObject {
     }
 
     func approveMarked() {
-        guard var review else { return }
+        guard var review, checkForDrafts() else { return }
         do {
             for index in review.photos.indices where marked.contains(review.photos[index].id) {
                 review.photos[index].metadata = try review.photos[index].metadata.validated()
@@ -113,7 +143,7 @@ private final class Workspace: ObservableObject {
     }
 
     func export(alongside: Bool) {
-        guard let review else { return }
+        guard let review, checkForDrafts() else { return }
         let target: SidecarTarget
         if alongside {
             target = .alongside
@@ -140,7 +170,16 @@ private final class Workspace: ObservableObject {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    private func checkForDrafts() -> Bool {
+        guard drafts.isEmpty else {
+            alert = "Save or discard unsaved metadata edits first. A pencil marks photos with unsaved edits."
+            return false
+        }
+        return true
+    }
+
     private func load(_ label: String, source: String, operation: @escaping @Sendable () async throws -> Review) {
+        guard checkForDrafts() else { return }
         activity = label
         Task {
             defer { activity = nil }
@@ -214,7 +253,10 @@ private struct WorkspaceView: View {
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
                         Spacer(minLength: 0)
-                        if entry.approved {
+                        if workspace.drafts[entry.id] != nil {
+                            Image(systemName: "pencil.circle.fill").foregroundStyle(.orange)
+                                .accessibilityLabel("Unsaved edits")
+                        } else if entry.approved {
                             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                                 .accessibilityLabel("Approved")
                         }
@@ -299,10 +341,11 @@ private struct WorkspaceView: View {
         .sheet(isPresented: $showIssues) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Scan Issues").font(.headline)
-                List(Array((workspace.review?.issues ?? []).enumerated()), id: \.offset) { row in
+                let issues = workspace.review?.issues ?? []
+                List(issues.indices, id: \.self) { i in
                     VStack(alignment: .leading) {
-                        Text(row.element.path).fontWeight(.medium).textSelection(.enabled)
-                        Text(row.element.message).foregroundStyle(.secondary).textSelection(.enabled)
+                        Text(issues[i].path).fontWeight(.medium).textSelection(.enabled)
+                        Text(issues[i].message).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                 }
                 Button("Done") { showIssues = false }.keyboardShortcut(.defaultAction)
@@ -327,7 +370,8 @@ private struct WorkspaceView: View {
     private var photosSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Read Apple Photos").font(.title2)
-            Stepper("Most recent \(workspace.photosLimit) images", value: $workspace.photosLimit, in: 10...500, step: 10)
+            Stepper("\(workspace.photosLimit) photos per page", value: $workspace.photosLimit, in: 10...500, step: 10)
+            Stepper("Page \(workspace.photosPage), most recent first", value: $workspace.photosPage, in: 1...1000)
             Toggle("Download iCloud-only originals", isOn: $workspace.allowICloud)
             Text("VisionCull reads still-image originals into its local cache. XMP exports go to a folder you choose.")
                 .foregroundStyle(.secondary)
@@ -348,19 +392,15 @@ private struct WorkspaceView: View {
 private struct PhotoInspector: View {
     let entry: PhotoEntry
     @ObservedObject var workspace: Workspace
-    @State private var draft: PhotoMetadata
-    @State private var keywords: String
-    @State private var latitude: String
-    @State private var longitude: String
     @State private var showImmich = false
 
-    init(entry: PhotoEntry, workspace: Workspace) {
-        self.entry = entry
-        self.workspace = workspace
-        _draft = State(initialValue: entry.metadata)
-        _keywords = State(initialValue: entry.metadata.subjects.joined(separator: ", "))
-        _latitude = State(initialValue: Self.coordinate(entry.metadata.latitude))
-        _longitude = State(initialValue: Self.coordinate(entry.metadata.longitude))
+    private var draft: Binding<MetadataDraft> {
+        Binding(
+            get: { workspace.drafts[entry.id] ?? MetadataDraft(entry.metadata) },
+            set: { newValue in
+                workspace.drafts[entry.id] = newValue == MetadataDraft(entry.metadata) ? nil : newValue
+            }
+        )
     }
 
     var body: some View {
@@ -401,32 +441,35 @@ private struct PhotoInspector: View {
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
                     GridRow {
                         Text("Motifs")
-                        TextField("Comma-separated keywords", text: $keywords).labelsHidden()
+                        TextField("Comma-separated keywords", text: draft.keywords).labelsHidden()
                     }
                     GridRow {
                         Text("Category")
-                        TextField("Category", text: $draft.category).labelsHidden()
+                        TextField("Category", text: draft.metadata.category).labelsHidden()
                     }
                     GridRow {
                         Text("Description")
-                        TextField("Short description", text: $draft.description, axis: .vertical)
+                        TextField("Short description", text: draft.metadata.description, axis: .vertical)
                             .labelsHidden().lineLimit(2...4)
                     }
                     GridRow {
                         Text("Capture date")
-                        TextField("YYYY-MM-DD or YYYY-MM-DDThh:mm:ss±hh:mm", text: $draft.capturedAt).labelsHidden()
+                        TextField("YYYY-MM-DD or YYYY-MM-DDThh:mm:ss±hh:mm", text: draft.metadata.capturedAt).labelsHidden()
                     }
                     GridRow {
                         Text("GPS")
                         HStack {
-                            TextField("Latitude", text: $latitude)
-                            TextField("Longitude", text: $longitude)
+                            TextField("Latitude", text: draft.latitude)
+                            TextField("Longitude", text: draft.longitude)
                         }
                     }
                 }
                 HStack {
-                    Button("Use Original Metadata") { reset(to: entry.existing) }
+                    Button("Use Original Metadata") { draft.wrappedValue = MetadataDraft(entry.existing) }
                     Button("Save Edits", action: save).buttonStyle(.borderedProminent).disabled(!dirty)
+                    if dirty {
+                        Button("Discard Edits") { workspace.drafts.removeValue(forKey: entry.id) }
+                    }
                     Spacer()
                     if entry.approved {
                         Button("Revoke Approval") { workspace.revoke(entry.id) }
@@ -445,36 +488,12 @@ private struct PhotoInspector: View {
         .sheet(isPresented: $showImmich) { ImmichSheet(photo: entry) }
     }
 
-    private var dirty: Bool {
-        draft != entry.metadata || keywords != entry.metadata.subjects.joined(separator: ", ")
-            || latitude != Self.coordinate(entry.metadata.latitude) || longitude != Self.coordinate(entry.metadata.longitude)
-    }
+    private var dirty: Bool { workspace.drafts[entry.id] != nil }
 
     private func save() {
         do {
-            var value = draft
-            value.subjects = keywords.components(separatedBy: ",")
-            let lat = latitude.trimmingCharacters(in: .whitespacesAndNewlines)
-            let lon = longitude.trimmingCharacters(in: .whitespacesAndNewlines)
-            value.latitude = lat.isEmpty ? nil : Double(lat)
-            value.longitude = lon.isEmpty ? nil : Double(lon)
-            if (!lat.isEmpty && value.latitude == nil) || (!lon.isEmpty && value.longitude == nil) {
-                throw WorkflowError.message("Enter decimal GPS coordinates, using a dot as the decimal separator.")
-            }
-            let updated = try workspace.apply(value, to: entry.id)
-            reset(to: updated.metadata)
+            try workspace.apply(draft.wrappedValue.value(), to: entry.id)
         } catch { workspace.alert = error.localizedDescription }
-    }
-
-    private static func coordinate(_ value: Double?) -> String {
-        value.map { String($0) } ?? ""
-    }
-
-    private func reset(to value: PhotoMetadata) {
-        draft = value
-        keywords = value.subjects.joined(separator: ", ")
-        latitude = Self.coordinate(value.latitude)
-        longitude = Self.coordinate(value.longitude)
     }
 }
 

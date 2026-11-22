@@ -7,9 +7,12 @@ import Photos
 public enum ApplePhotos {
     /// Reads still-photo original resources into the private working cache. iCloud is opt-in.
     public static func scan(
-        scanner: PhotoScanner, limit: Int = 50, allowICloud: Bool = false
+        scanner: PhotoScanner, limit: Int = 50, offset: Int = 0, allowICloud: Bool = false
     ) async throws -> Review {
-        guard limit > 0 else { throw WorkflowError.message("The Apple Photos limit must be positive.") }
+        let (end, overflow) = offset.addingReportingOverflow(limit)
+        guard limit > 0, offset >= 0, !overflow else {
+            throw WorkflowError.message("Use a positive Photos limit and a nonnegative offset.")
+        }
         #if os(macOS)
         guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryUsageDescription") != nil else {
             throw WorkflowError.message("Use the packaged VisionCull app or CLI (Scripts/build-macos.sh) for Apple Photos access.")
@@ -19,12 +22,12 @@ public enum ApplePhotos {
             throw WorkflowError.message("Allow VisionCull to access Apple Photos in System Settings → Privacy & Security → Photos.")
         }
         let options = PHFetchOptions()
-        options.fetchLimit = limit
+        options.fetchLimit = end
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         let assets = PHAsset.fetchAssets(with: .image, options: options)
         var issues = [ScanIssue]()
         var inputs = [PhotoInput]()
-        for index in 0..<assets.count {
+        for index in min(offset, assets.count)..<assets.count {
             try Task.checkCancellation()
             let asset = assets.object(at: index)
             do {
@@ -60,7 +63,7 @@ public enum ApplePhotos {
         let destination = directory.appendingPathComponent(filename)
         let manager = FileManager.default
         if (try? FileRevision.read(destination)) == nil {
-            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let temporary = directory.appendingPathComponent(UUID().uuidString)
             defer { try? manager.removeItem(at: temporary) }
             let options = PHAssetResourceRequestOptions()

@@ -173,7 +173,12 @@ public struct Review: Codable, Sendable {
     }
 
     public static func read(_ url: URL) throws -> Review {
-        try JSONDecoder().decode(Review.self, from: Data(contentsOf: url))
+        let result = try JSONDecoder().decode(Review.self, from: Data(contentsOf: url))
+        guard Set(result.photos.map(\.id)).count == result.photos.count,
+              result.photos.allSatisfy({ $0.file.isFileURL }) else {
+            throw WorkflowError.message("The review contains duplicate photo IDs or nonlocal URLs.")
+        }
+        return result
     }
 
     public func write(_ url: URL, replacingReview: Bool = false) throws {

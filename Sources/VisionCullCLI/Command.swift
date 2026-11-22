@@ -12,7 +12,7 @@ struct Command {
     VisionCull — local photo review for macOS
 
       visioncull scan FOLDER --review REVIEW.json [--cache DIR] [--duplicates] [--metadata-only]
-      visioncull photos --review REVIEW.json [--cache DIR] [--limit N] [--icloud] [--duplicates]
+      visioncull photos --review REVIEW.json [--cache DIR] [--limit N] [--offset N] [--icloud] [--duplicates]
       visioncull preview REVIEW.json
       visioncull edit REVIEW.json PHOTO [--subjects A,B] [--category NAME] [--description TEXT]
                      [--date ISO-8601] [--latitude DECIMAL --longitude DECIMAL | --clear-gps]
@@ -42,7 +42,7 @@ struct Command {
         switch command {
         case "scan", "photos":
             let isFolder = command == "scan"
-            let allowed: Set<String> = isFolder ? ["--review", "--cache"] : ["--review", "--cache", "--limit"]
+            let allowed: Set<String> = isFolder ? ["--review", "--cache"] : ["--review", "--cache", "--limit", "--offset"]
             let flags: Set<String> = isFolder ? ["--duplicates", "--metadata-only"] : ["--duplicates", "--icloud"]
             let options = try Options(args, values: allowed, flags: flags)
             try options.expect(isFolder ? 1 : 0)
@@ -61,7 +61,10 @@ struct Command {
             } else {
                 let limit = options.value("--limit") ?? "50"
                 guard let limit = Int(limit), limit > 0 else { throw WorkflowError.message("--limit must be positive.") }
-                review = try await ApplePhotos.scan(scanner: scanner, limit: limit, allowICloud: options.has("--icloud"))
+                guard let offset = Int(options.value("--offset") ?? "0"), offset >= 0 else {
+                    throw WorkflowError.message("--offset must be nonnegative.")
+                }
+                review = try await ApplePhotos.scan(scanner: scanner, limit: limit, offset: offset, allowICloud: options.has("--icloud"))
             }
             try review.write(file(path))
             print("\(review.photos.count) photos, \(review.analyzed) analyzed, \(review.reused) cached, \(review.issues.count) issues")

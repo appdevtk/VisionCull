@@ -28,11 +28,11 @@ The analysis cache is stored under `~/Library/Application Support/VisionCull`. A
 
 ### Apple Photos and iCloud
 
-Use **Open → Apple Photos** to read the most recent photos available to the app in the system photo library. PhotoKit calls the required permission “read/write.” VisionCull uses it to fetch assets and copy original still-image resources to its own cache. XMP for these photos always goes to a separate export folder.
+Use **Open → Apple Photos** to read a page of recent photos available to the app in the system photo library. PhotoKit calls the required permission “read/write.” VisionCull uses it to fetch assets and copy original still-image resources to its own cache. XMP for these photos always goes to a separate export folder.
 
 Enable **Download iCloud-only originals** to let PhotoKit fetch originals that are stored in iCloud. This can use network data and local disk space. With downloads disabled, unavailable originals appear in scan issues. Apple Photos originals copied into the local cache remain available to saved reviews until that cache is removed. Live Photo video companions and alternate RAW resources are outside this workflow.
 
-Use the packaged app or CLI so macOS can display the Photos permission prompt. The packaged CLI supports `photos --limit N` and the optional `--icloud` flag.
+Use the packaged app or CLI so macOS can display the Photos permission prompt. The packaged CLI supports `photos --limit N --offset N` and the optional `--icloud` flag.
 
 ### Immich
 
