@@ -134,7 +134,8 @@ public struct PhotoScanner: Sendable {
                 issues.append(ScanIssue(path: input.relativePath, message: error.localizedDescription))
             }
         }
-        return Review(photos: entries, issues: issues, analyzed: analyzed, reused: reused)
+        let proposed = try TagVocabulary(root: cacheRoot).propose(for: entries)
+        return Review(photos: proposed, issues: issues, analyzed: analyzed, reused: reused)
     }
 
     private static func canonicalPath(_ url: URL) throws -> String {

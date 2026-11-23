@@ -159,6 +159,72 @@ final class WorkflowTests: XCTestCase {
         XCTAssertNil(proposed.rating)
     }
 
+    func testApprovalReusesExistingNamesAndLearnsFromDistinctPhotos() throws {
+        let root = try temporary()
+        let model = ImageAnalysis(subjects: ["forest"], topics: ["Outdoors"], moods: ["Calm"], styles: ["Dark"])
+        let source = try tagPhoto(id: "source", analysis: model, metadata: PhotoMetadata(topics: ["Natur"]))
+        var first = try tagPhoto(id: "one", analysis: model)
+        first.metadata.moods = ["Kontemplativ"]
+        first.metadata.topics = ["Outdoors", "Natur", "NATUR"]
+        var second = try tagPhoto(id: "two", analysis: model)
+        second.metadata.moods = ["kontemplativ"]
+        second.metadata.topics = ["Natur & Outdoor"]
+        let store = TagVocabulary(root: root)
+        let initial = Review(photos: [source, first, second], issues: [], analyzed: 3, reused: 0)
+        let once = try store.approve(initial, ids: ["one"])
+        let again = try store.approve(once, ids: ["one"])
+        let next = try tagPhoto(id: "next", analysis: model)
+        XCTAssertEqual(try store.propose(for: [next])[0].metadata.moods, ["Calm"])
+
+        let confirmed = try store.approve(again, ids: ["two"])
+        XCTAssertEqual(confirmed.photos.filter(\.approved).map(\.metadata.topics), [["Natur"], ["Natur"]])
+        XCTAssertEqual(confirmed.photos.filter(\.approved).map(\.metadata.moods), [["Kontemplativ"], ["Kontemplativ"]])
+        let reopened = TagVocabulary(root: root)
+        let suggested = try reopened.propose(for: [next])[0]
+        XCTAssertEqual(suggested.metadata.moods, ["Kontemplativ"])
+        XCTAssertEqual(suggested.metadata.topics, ["Natur"])
+        XCTAssertTrue(suggested.matchesSearch("outdoors kontemplativ"))
+        XCTAssertFalse(suggested.approved)
+
+        let unrelated = try tagPhoto(id: "unrelated", analysis: ImageAnalysis(moods: ["Lively"], styles: ["Bright"]))
+        XCTAssertEqual(try reopened.propose(for: [unrelated])[0].metadata.moods, ["Lively"])
+        try reopened.forget("one")
+        XCTAssertEqual(try reopened.propose(for: [next])[0].metadata.moods, ["Calm"])
+    }
+
+    func testTagAliasesTypoAndAmbiguousApproval() throws {
+        let root = try temporary()
+        let known = PhotoMetadata(
+            topics: ["Reise"], moods: ["Ruhig"], styles: ["Abendlicht", "Sunlit", "Sunlites"]
+        )
+        let source = try tagPhoto(id: "source", metadata: known)
+        var next = try tagPhoto(id: "next")
+        next.metadata = PhotoMetadata(
+            topics: ["Travel", "reise"], moods: ["Pensive", "Quiet", "ruhig", "RUHIG"], styles: ["Golden-hour", "Abendlict"]
+        )
+        let store = TagVocabulary(root: root)
+        var review = Review(photos: [source, next], issues: [], analyzed: 2, reused: 0)
+        let approved = try store.approve(review, ids: ["next"])
+        XCTAssertEqual(approved.photos[1].metadata.topics, ["Reise"])
+        XCTAssertEqual(approved.photos[1].metadata.styles, ["Abendlicht"])
+        XCTAssertEqual(approved.photos[1].metadata.moods, ["Pensive", "Ruhig"])
+        XCTAssertTrue(approved.photos[1].matchesSearch("golden hour travel calm"))
+
+        review.photos[1].metadata.styles = ["Sunlite"]
+        XCTAssertThrowsError(try store.approve(review, ids: ["next"]) { _ in
+            XCTFail("Ambiguity must prevent saving the approval")
+        }) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Sunlit, Sunlites"))
+        }
+    }
+
+    private func tagPhoto(id: String, analysis: ImageAnalysis = ImageAnalysis(), metadata: PhotoMetadata = PhotoMetadata()) throws -> PhotoEntry {
+        PhotoEntry(
+            id: id, file: fixture, relativePath: id + ".png", revision: try FileRevision.read(fixture),
+            existing: metadata, analysis: analysis
+        )
+    }
+
     #if os(macOS)
     func testAppleVisionRunsOnLocalFixture() throws {
         let result = try LocalVisionAnalyzer(includeDuplicates: true).analyze(fixture)

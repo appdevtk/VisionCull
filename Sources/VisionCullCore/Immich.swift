@@ -56,8 +56,9 @@ public final class ImmichClient: Sendable {
             throw WorkflowError.message("Asset \(assetID) does not match the reviewed image checksum, or is unavailable. Confirm the exact asset in Immich.")
         }
         if let album { try await verifyAlbum(album) }
+        let tags = try await planTags(for: metadata, current: asset.tags ?? [])
         do {
-            try await apply(metadata, to: assetID, current: asset)
+            try await apply(metadata, to: assetID, current: asset, tags: tags)
             if let album { try await add(assetID, to: album) }
         } catch {
             throw WorkflowError.message("Immich asset \(assetID): \(error.localizedDescription). Some earlier steps may have succeeded.")
@@ -81,6 +82,7 @@ public final class ImmichClient: Sendable {
             throw WorkflowError.message("Immich declined the new upload.\(details) Verify the match before choosing Update.")
         }
 
+        let tags = try await planTags(for: metadata, current: [])
         let boundary = "VisionCull-\(UUID().uuidString)"
         let multipart = try makeMultipart(photo, metadata: metadata, boundary: boundary)
         defer { try? FileManager.default.removeItem(at: multipart) }
@@ -99,7 +101,7 @@ public final class ImmichClient: Sendable {
                 throw WorkflowError.message("Immich returned a different checksum or an unavailable asset.")
             }
             try await add(receipt.id, to: album)
-            try await apply(metadata, to: receipt.id, current: asset)
+            try await apply(metadata, to: receipt.id, current: asset, tags: tags)
         } catch {
             throw WorkflowError.message("Uploaded asset \(receipt.id), but follow-up failed: \(error.localizedDescription). Use Update with this ID to finish.")
         }
@@ -159,7 +161,7 @@ public final class ImmichClient: Sendable {
         }
     }
 
-    private func apply(_ metadata: PhotoMetadata, to asset: UUID, current: Asset) async throws {
+    private func apply(_ metadata: PhotoMetadata, to asset: UUID, current: Asset, tags: [PlannedTag]) async throws {
         var patch: [String: Any] = [:]
         if !metadata.description.isEmpty { patch["description"] = metadata.description }
         if !metadata.capturedAt.isEmpty { patch["dateTimeOriginal"] = metadata.capturedAt }
@@ -173,23 +175,89 @@ public final class ImmichClient: Sendable {
             guard updated.id == asset else { throw WorkflowError.message("Immich returned a different updated asset.") }
         }
 
-        var seen = Set((current.tags ?? []).map { $0.value.lowercased() })
-        let candidates = metadata.subjects + [metadata.category] + metadata.structuredKeywords
-        let tags = candidates.filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
-        if !tags.isEmpty {
-            let returned: [Tag] = try await send("PUT", "tags", body: ["tags": tags])
-            let requested = Set(tags.map { $0.lowercased() })
-            let matched = returned.filter { requested.contains($0.value.lowercased()) }
-            guard Set(matched.map { $0.value.lowercased() }) == requested, matched.count == requested.count else {
+        let attached = Set((current.tags ?? []).map { TagRules.pathKey($0.value) })
+        let pending = tags.filter { !attached.contains(TagRules.pathKey($0.path)) }
+        guard !pending.isEmpty else { return }
+        var ids = Set(pending.compactMap(\.id))
+        let names = pending.filter { $0.id == nil }.map(\.path)
+        if !names.isEmpty {
+            let returned: [Tag] = try await send("PUT", "tags", body: ["tags": names])
+            let requested = Set(names.map(TagRules.pathKey))
+            let matched = returned.filter { requested.contains(TagRules.pathKey($0.value)) }
+            guard Set(matched.map { TagRules.pathKey($0.value) }) == requested, matched.count == requested.count else {
                 throw WorkflowError.message("Immich did not return every requested tag.")
             }
-            let _: TagResult = try await send(
-                "PUT", "tags/assets", body: ["assetIds": [asset.uuidString], "tagIds": matched.map { $0.id.uuidString }]
-            )
-            let verified: Asset = try await send("GET", "assets/\(asset.uuidString)")
-            let values = Set((verified.tags ?? []).map { $0.value.lowercased() })
-            guard verified.id == asset, tags.allSatisfy({ values.contains($0.lowercased()) }) else {
-                throw WorkflowError.message("Immich did not confirm all associated tags.")
+            ids.formUnion(matched.map(\.id))
+        }
+        let _: TagResult = try await send(
+            "PUT", "tags/assets", body: ["assetIds": [asset.uuidString], "tagIds": ids.map(\.uuidString).sorted()]
+        )
+        let verified: Asset = try await send("GET", "assets/\(asset.uuidString)")
+        let confirmed = Set((verified.tags ?? []).map(\.id))
+        guard verified.id == asset, ids.isSubset(of: confirmed) else {
+            throw WorkflowError.message("Immich did not confirm all associated tags.")
+        }
+    }
+
+    private func planTags(for metadata: PhotoMetadata, current: [Tag]) async throws -> [PlannedTag] {
+        let paths = (metadata.subjects + [metadata.category] + metadata.structuredKeywords).filter { !$0.isEmpty }
+        guard !paths.isEmpty else { return [] }
+        let serverTags: [Tag] = try await send("GET", "tags")
+        let currentIDs = Set(current.map(\.id))
+        let inventory = (current + serverTags.filter { !currentIDs.contains($0.id) }.sorted { $0.value < $1.value })
+            .map { PlannedTag(path: $0.value, id: $0.id) }
+        var planned = [PlannedTag]()
+        for path in paths {
+            let available = inventory + planned
+            let candidate = PlannedTag(path: path, id: nil)
+            let exact = available.first { TagRules.pathKey($0.path) == TagRules.pathKey(path) }
+            let group = candidate.group
+            let matching = group == nil ? [] : available.filter { $0.group == group || $0.group == .subjects }
+            let associated = group.flatMap { group in
+                matching.first { option in
+                    guard let id = option.id, currentIDs.contains(id) else { return false }
+                    return TagRules.equivalent(candidate.leaf, option.leaf, in: group)
+                }
+            }
+            let resolved: PlannedTag
+            if let preferred = associated ?? exact {
+                resolved = preferred
+            } else if let group {
+                let names = matching.map(\.leaf)
+                let match = try TagRules.resolve(
+                    candidate.leaf, in: group, candidates: names
+                )
+                if match.existing, let known = matching.first(where: { $0.leaf == match.name }) {
+                    resolved = known
+                } else {
+                    resolved = PlannedTag(path: candidate.prefix + match.name, id: nil)
+                }
+            } else {
+                resolved = candidate
+            }
+            if !planned.contains(where: { TagRules.pathKey($0.path) == TagRules.pathKey(resolved.path) }) {
+                planned.append(resolved)
+            }
+        }
+        return planned
+    }
+
+    private struct PlannedTag {
+        let path: String
+        let id: UUID?
+
+        var leaf: String { path.split(separator: "/").last.map(String.init) ?? path }
+        var prefix: String { String(path.dropLast(leaf.count)) }
+
+        var group: TagGroup? {
+            let parts = path.split(separator: "/")
+            if parts.count == 1 { return .subjects }
+            guard parts.count >= 2 else { return nil }
+            switch TagRules.key(String(parts[parts.count - 2])) {
+            case "topic", "topics", "theme", "themes", "thema", "themen": return .topics
+            case "mood", "moods", "stimmung", "stimmungen": return .moods
+            case "style", "styles", "bildstil", "bildstile", "stil", "stile": return .styles
+            default: return nil
             }
         }
     }

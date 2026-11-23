@@ -74,22 +74,27 @@ final class ImmichTests: XCTestCase {
         let topicID = UUID()
         let moodID = UUID()
         let styleID = UUID()
+        let otherMoodID = UUID()
         let relatedParent = UUID()
-        let existing = ["id": moodID.uuidString, "value": "VisionCull/Moods/Calm"]
-        let topic = ["id": topicID.uuidString, "value": "VisionCull/Topics/Travel"]
-        let style = ["id": styleID.uuidString, "value": "VisionCull/Styles/Warm tones"]
+        let existing = ["id": moodID.uuidString, "value": "Stimmungen/Ruhig"]
+        let otherMood = ["id": otherMoodID.uuidString, "value": "VisionCull/Moods/Calm"]
+        let topic = ["id": topicID.uuidString, "value": "Themen/Reise"]
+        let stylePath = "VisionCull/Styles/Warm tones"
+        let style = ["id": styleID.uuidString, "value": stylePath]
         var photo = try makePhoto()
         photo.metadata = PhotoMetadata(topics: ["Travel"], moods: ["Calm"], styles: ["Warm tones"], rating: 4)
         let associated = AttachmentRecord()
         let client = try client { request in
             switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/tags"):
+                return [existing, otherMood, topic]
             case ("PUT", "/api/assets/\(asset)"):
                 let values = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.requestBody(request)) as? [String: Int])
                 XCTAssertEqual(values, ["rating": 4])
             case ("PUT", "/api/tags"):
                 let values = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.requestBody(request)) as? [String: [String]])
-                XCTAssertEqual(values["tags"], [topic["value"]!, style["value"]!])
-                return [topic, style, ["id": relatedParent.uuidString, "value": "VisionCull/Topics"]]
+                XCTAssertEqual(values["tags"], [stylePath])
+                return [style, ["id": relatedParent.uuidString, "value": "VisionCull/Styles"]]
             case ("PUT", "/api/tags/assets"):
                 let values = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.requestBody(request)) as? [String: [String]])
                 XCTAssertEqual(values["assetIds"], [asset.uuidString])
@@ -108,6 +113,28 @@ final class ImmichTests: XCTestCase {
         }
         try await client.update(photo, assetID: asset)
         XCTAssertTrue(associated.value)
+    }
+
+    func testAmbiguousCatalogStopsBeforeUpdatingTheAsset() async throws {
+        let asset = UUID()
+        var photo = try makePhoto()
+        photo.metadata = PhotoMetadata(description: "Draft caption", styles: ["Sunlite"])
+        let client = try client { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            if request.url?.path == "/api/tags" {
+                return [
+                    ["id": UUID().uuidString, "value": "VisionCull/Styles/Sunlit"],
+                    ["id": UUID().uuidString, "value": "Bildstile/Sunlites"],
+                ]
+            }
+            return ["id": asset.uuidString, "checksum": "test-checksum", "type": "IMAGE", "isTrashed": false]
+        }
+        do {
+            try await client.update(photo, assetID: asset)
+            XCTFail("An ambiguous tag should require review")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("Sunlit, Sunlites"))
+        }
     }
 
     func testExplicitNewUploadIsAttachedToTheRequestedAlbum() async throws {

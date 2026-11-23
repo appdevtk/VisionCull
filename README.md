@@ -24,7 +24,15 @@ The build is ad-hoc signed for development. Distribution to other Macs may requi
 
 The **Aesthetics** panel shows the Apple Vision score (−1 to +1), the utility-image flag when present, and color and tone estimates from a downsized sRGB preview. It includes brightness, contrast, saturation, deep shadows, near-white highlights, and a small palette. Topics group recognized subjects and scenes. Mood suggestions are based on visual cues such as low contrast or vivid color, and can be edited like any other tag. Your star rating is a separate, manual choice.
 
-Search the sidebar by topic, mood, style, or other photo text. Multiple words can match different fields. Older review JSON files still open. A fresh scan generates the new suggestions and upgrades the analysis cache.
+Search the sidebar by topic, mood, style, or other photo text. Multiple words can match different fields. German and English aliases work in the search, so `ruhig` also finds `Calm`. Older review JSON files still open.
+
+### Learn and reuse tags
+
+VisionCull keeps a local tag vocabulary. When you approve a review, it reuses recognized spellings, aliases, and clear typos. For example, a collection that already uses `Abendlicht` will keep that spelling when you enter `Golden Hour`. Unclear matches list the existing choices before approval. A term without a match can join the vocabulary when you approve it.
+
+A new scan uses past approvals to suggest personal tags. VisionCull needs at least two different, similar photos with consistent tags before it changes a mood or style suggestion. It can also suggest your known topics and motifs for similar photos. Source metadata takes precedence. You review each suggestion and choose your own stars. This learns from approvals made with this version, including older reviews you reopen and approve again.
+
+The vocabulary lives under `~/Library/Application Support/VisionCull` alongside the analysis cache. If you supply `--cache DIR` for a scan, use the same option for the CLI approval. Reused analysis gets fresh tag suggestions from the current vocabulary.
 
 Existing, different XMP files are preserved. If they already exist or two inputs share a sidecar name, resolve the conflict or choose a fresh export location. The app rejects a reviewed file that changed before export. Review JSON files contain local file paths and may contain GPS.
 
@@ -44,7 +52,7 @@ Choose an approved photo and explicitly select **Update Existing** or **Upload N
 
 - **Update existing:** Supply the exact Immich asset UUID. VisionCull verifies its checksum against the local original before updating metadata. If the checksum differs, verify the original in Immich before trying again.
 - **Upload new:** Supply a target album UUID. VisionCull checks for an existing checksum before sending the image. A duplicate result asks you to verify the returned asset ID and then explicitly choose Update. If an upload succeeds and a later step fails, the error includes the new asset ID so you can finish with Update and the album UUID.
-- VisionCull adds confirmed motifs and category as Immich tags. Topics, moods, and styles use searchable paths such as `VisionCull/Topics/Travel`, `VisionCull/Moods/Calm`, and `VisionCull/Styles/Warm tones`. The same paths are exported as XMP keywords. A confirmed star rating becomes the Immich rating and `xmp:Rating`. Existing Immich tags are preserved, and empty fields are skipped. To send an edited capture time to Immich, include an explicit timezone offset. The server URL must use HTTPS, with HTTP accepted on loopback for local testing.
+- VisionCull reads the server’s tag catalog before sending tags. The API key needs permission to read tags as well as to create and attach them as needed. It reuses matching tags and their IDs, including recognized German and English names. For several uncertain matches, edit the tag in the review and approve again before retrying. VisionCull adds confirmed motifs and category as Immich tags. Topics, moods, and styles use searchable paths such as `VisionCull/Topics/Travel`, `VisionCull/Moods/Calm`, and `VisionCull/Styles/Warm tones`. The same paths are exported as XMP keywords. A confirmed star rating becomes the Immich rating and `xmp:Rating`. Existing Immich tags are preserved, and empty fields are skipped. To send an edited capture time to Immich, include an explicit timezone offset. The server URL must use HTTPS, with HTTP accepted on loopback for local testing.
 
 ### CLI example
 

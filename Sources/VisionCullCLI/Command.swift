@@ -17,7 +17,7 @@ struct Command {
       visioncull edit REVIEW.json PHOTO [--subjects A,B] [--category NAME] [--description TEXT]
                      [--topics A,B] [--moods A,B] [--styles A,B] [--rating 0…5]
                      [--date ISO-8601] [--latitude DECIMAL --longitude DECIMAL | --clear-gps]
-      visioncull approve REVIEW.json (--all | PHOTO...)
+      visioncull approve REVIEW.json [--cache DIR] (--all | PHOTO...)
       visioncull export REVIEW.json (--alongside | --output DIR)
       visioncull immich update REVIEW.json PHOTO --server URL --asset-id UUID [--album UUID]
       visioncull immich upload REVIEW.json PHOTO --server URL --album UUID
@@ -102,21 +102,25 @@ struct Command {
                 "--topics", "--moods", "--styles", "--rating",
             ], flags: ["--clear-gps"]))
         case "approve":
-            let options = try Options(args, flags: ["--all"])
+            let options = try Options(args, values: ["--cache"], flags: ["--all"])
             guard let path = options.positionals.first, options.has("--all") == (options.positionals.count == 1) else {
                 throw WorkflowError.message("Specify a review and either --all or exact photo paths.")
             }
             let url = file(path)
-            var review = try Review.read(url)
+            let revision = try FileRevision.read(url)
+            let review = try Review.read(url)
             let indices = try options.has("--all") ? Array(review.photos.indices)
                 : options.positionals.dropFirst().map { try index($0, in: review) }
             guard !indices.isEmpty else { throw WorkflowError.message("There are no photos to approve.") }
-            for i in Set(indices) {
-                review.photos[i].metadata = try review.photos[i].metadata.validated()
-                review.photos[i].approved = true
+            let ids = Set(indices.map { review.photos[$0].id })
+            let vocabulary = TagVocabulary(root: options.value("--cache").map(file) ?? PhotoScanner.defaultCache)
+            _ = try vocabulary.approve(review, ids: ids) { updated in
+                guard try FileRevision.read(url) == revision else {
+                    throw WorkflowError.message("The review changed during approval. Read it again and retry.")
+                }
+                try updated.write(url, replacingReview: true)
             }
-            try review.write(url, replacingReview: true)
-            print("Approved \(Set(indices).count) photos.")
+            print("Approved \(ids.count) photos.")
         case "export":
             let options = try Options(args, values: ["--output"], flags: ["--alongside"])
             try options.expect(1)

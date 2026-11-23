@@ -133,21 +133,32 @@ private final class Workspace: ObservableObject {
     }
 
     func approveMarked() {
-        guard var review, checkForDrafts() else { return }
-        do {
-            for index in review.photos.indices where marked.contains(review.photos[index].id) {
-                review.photos[index].metadata = try review.photos[index].metadata.validated()
-                review.photos[index].approved = true
-            }
-            self.review = review
-            status = "Approved \(marked.count) photos."
-            marked.removeAll()
-        } catch { alert = error.localizedDescription }
+        guard let review, checkForDrafts() else { return }
+        let ids = marked
+        activity = "Approving photos…"
+        Task {
+            defer { activity = nil }
+            do {
+                self.review = try await Task.detached(priority: .userInitiated) {
+                    try TagVocabulary().approve(review, ids: ids)
+                }.value
+                status = "Approved \(ids.count) photos and updated your tag vocabulary."
+                marked.subtract(ids)
+            } catch { alert = error.localizedDescription }
+        }
     }
 
     func revoke(_ id: String) {
-        if let index = review?.photos.firstIndex(where: { $0.id == id }) {
-            review?.photos[index].approved = false
+        activity = "Revoking approval…"
+        Task {
+            defer { activity = nil }
+            do {
+                try await Task.detached { try TagVocabulary().forget(id) }.value
+                if let index = review?.photos.firstIndex(where: { $0.id == id }) {
+                    review?.photos[index].approved = false
+                }
+                status = "Revoked approval and removed the example from your tag vocabulary."
+            } catch { alert = error.localizedDescription }
         }
     }
 

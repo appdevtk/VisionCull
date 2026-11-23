@@ -62,7 +62,7 @@ public struct PhotoMetadata: Codable, Equatable, Sendable {
     public func validated() throws -> PhotoMetadata {
         var result = self
         result.subjects = Self.uniqueTags(subjects)
-        for group in TagGroup.allCases {
+        for group in TagGroup.structured {
             let tags = Self.uniqueTags(self[keyPath: group.field])
             guard tags.allSatisfy({ !$0.contains("/") }) else {
                 throw WorkflowError.message("Use comma-separated \(group.rawValue.lowercased()) without slashes.")
@@ -120,13 +120,13 @@ public struct PhotoMetadata: Codable, Equatable, Sendable {
 
     /// Keep user-confirmed tags portable between Immich and XMP.
     var structuredKeywords: [String] {
-        TagGroup.allCases.flatMap { group in
+        TagGroup.structured.flatMap { group in
             self[keyPath: group.field].map { group.prefix + $0 }
         }
     }
 
     mutating func addKeyword(_ keyword: String) {
-        for group in TagGroup.allCases where keyword.hasPrefix(group.prefix) {
+        for group in TagGroup.structured where keyword.hasPrefix(group.prefix) {
             let tag = String(keyword.dropFirst(group.prefix.count))
             if !tag.isEmpty && !tag.contains("/") {
                 self[keyPath: group.field].append(tag)
@@ -142,19 +142,24 @@ public struct PhotoMetadata: Codable, Equatable, Sendable {
             .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
     }
 
-    private enum TagGroup: String, CaseIterable {
-        case topics = "Topics"
-        case moods = "Moods"
-        case styles = "Styles"
+}
 
-        var prefix: String { "VisionCull/\(rawValue)/" }
+enum TagGroup: String, CaseIterable, Codable, Sendable {
+    case subjects = "Motifs"
+    case topics = "Topics"
+    case moods = "Moods"
+    case styles = "Styles"
 
-        var field: WritableKeyPath<PhotoMetadata, [String]> {
-            switch self {
-            case .topics: return \.topics
-            case .moods: return \.moods
-            case .styles: return \.styles
-            }
+    static let structured: [Self] = [.topics, .moods, .styles]
+
+    var prefix: String { "VisionCull/\(rawValue)/" }
+
+    var field: WritableKeyPath<PhotoMetadata, [String]> {
+        switch self {
+        case .subjects: return \.subjects
+        case .topics: return \.topics
+        case .moods: return \.moods
+        case .styles: return \.styles
         }
     }
 }
@@ -241,8 +246,10 @@ public struct PhotoEntry: Codable, Equatable, Identifiable, Sendable {
 
     public func matchesSearch(_ query: String) -> Bool {
         let terms = query.split(whereSeparator: \.isWhitespace)
-        let fields = [relativePath, metadata.category, metadata.description] + metadata.subjects
-            + metadata.topics + metadata.moods + metadata.styles
+        let tags = TagGroup.allCases.flatMap { group in
+            metadata[keyPath: group.field].flatMap { TagRules.searchNames(for: $0, in: group) }
+        }
+        let fields = [relativePath, metadata.category, metadata.description] + tags
         return terms.allSatisfy { term in
             fields.contains { $0.localizedStandardContains(String(term)) }
         }
