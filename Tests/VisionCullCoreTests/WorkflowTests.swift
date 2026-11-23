@@ -97,11 +97,78 @@ final class WorkflowTests: XCTestCase {
         XCTAssertThrowsError(try XMP.document(for: PhotoMetadata(description: "\u{1}")))
     }
 
+    func testSearchMetadataRoundTripsAndReadsLegacyReviews() throws {
+        let legacy = Data(#"{"subjects":["flowery"],"category":"Plants","description":"","capturedAt":""}"#.utf8)
+        let older = try JSONDecoder().decode(PhotoMetadata.self, from: legacy)
+        XCTAssertEqual(older, PhotoMetadata(subjects: ["flowery"], category: "Plants"))
+        let olderExport = try XMP.read(XMP.document(for: older))
+        XCTAssertEqual(olderExport, older)
+
+        let approved = try PhotoMetadata(
+            subjects: ["Tulips"], description: "Pale pink blossoms",
+            topics: [" Frühling & Garten ", "frühling & garten"], moods: ["Calm"], styles: ["Soft contrast"], rating: 4
+        ).validated()
+        let encoded = try XMP.document(for: approved)
+        XCTAssertTrue(String(decoding: encoded, as: UTF8.self).contains("VisionCull/Topics/Frühling &amp; Garten"))
+        XCTAssertTrue(String(decoding: encoded, as: UTF8.self).contains("<xmp:Rating>4</xmp:Rating>"))
+        XCTAssertEqual(try XMP.read(encoded), approved)
+        let ratingAttribute = Data("""
+        <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:stars="http://ns.adobe.com/xap/1.0/">
+          <rdf:Description stars:Rating="3"/>
+        </rdf:RDF>
+        """.utf8)
+        XCTAssertEqual(try XMP.read(ratingAttribute).rating, 3)
+        XCTAssertEqual(try JSONDecoder().decode(PhotoMetadata.self, from: JSONEncoder().encode(approved)), approved)
+        var entry = PhotoEntry(
+            id: "sample", file: fixture, relativePath: "weekend/sample.png", revision: try FileRevision.read(fixture),
+            existing: approved, analysis: ImageAnalysis(topics: ["New topic"], moods: ["Dramatic"], styles: ["Dark"])
+        )
+        XCTAssertEqual(entry.metadata, approved)
+        XCTAssertTrue(entry.matchesSearch("fruhling CALM pink"))
+        XCTAssertFalse(entry.matchesSearch("fruhling dramatic"))
+        entry.metadata.moods = ["Dramatic"]
+        XCTAssertTrue(entry.matchesSearch("fruhling dramatic"))
+        XCTAssertThrowsError(try PhotoMetadata(topics: ["a/b"]).validated())
+        XCTAssertThrowsError(try PhotoMetadata(rating: 6).validated())
+    }
+
+    func testAppearanceMeasuresTonesAndSkipsTransparentPixels() throws {
+        let black: [UInt8] = [0, 0, 0, 255]
+        var lowKey = Array(repeating: black, count: 8).flatMap { $0 }
+        lowKey += [255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0]
+        let dramatic = try XCTUnwrap(ImageAppearance.measure(premultipliedRGBA: lowKey))
+        XCTAssertEqual(dramatic.brightness, 0.2, accuracy: 0.0001)
+        XCTAssertEqual(dramatic.contrast, 1, accuracy: 0.0001)
+        XCTAssertEqual(dramatic.shadowFraction, 0.8)
+        XCTAssertEqual(dramatic.highlightFraction, 0.2)
+        XCTAssertEqual(dramatic.palette, ["#000000", "#FFFFFF"])
+        XCTAssertEqual(dramatic.moodSuggestions, ["Dramatic"])
+        XCTAssertTrue(dramatic.styleSuggestions.contains("Near monochrome"))
+        let calm = try XCTUnwrap(ImageAppearance.measure(premultipliedRGBA: [100, 100, 100, 255]))
+        XCTAssertEqual(calm.moodSuggestions, ["Calm"])
+        XCTAssertNil(ImageAppearance.measure(premultipliedRGBA: [0, 0, 0, 0]))
+        XCTAssertEqual(
+            LocalVisionAnalyzer.topics(for: ["concert_stage", "forest path", "city building"]),
+            ["Music & performance", "Nature & outdoors", "Cities & architecture"]
+        )
+        let proposed = PhotoMetadata().proposed(using: ImageAnalysis(
+            topics: ["Music & performance"], moods: dramatic.moodSuggestions, styles: dramatic.styleSuggestions
+        ))
+        XCTAssertEqual(proposed.topics, ["Music & performance"])
+        XCTAssertEqual(proposed.moods, ["Dramatic"])
+        XCTAssertNil(proposed.rating)
+    }
+
     #if os(macOS)
     func testAppleVisionRunsOnLocalFixture() throws {
         let result = try LocalVisionAnalyzer(includeDuplicates: true).analyze(fixture)
         XCTAssertNotNil(result.aestheticScore)
+        XCTAssertNotNil(result.isUtility)
         XCTAssertFalse(try XCTUnwrap(result.featurePrint).isEmpty)
+        let appearance = try XCTUnwrap(result.appearance)
+        XCTAssertGreaterThan(appearance.brightness, 0.25)
+        XCTAssertGreaterThan(appearance.saturation, 0.2)
+        XCTAssertEqual(appearance.palette.count, 3)
     }
 
     func testImageIOReadsEmbeddedCaptureMetadata() throws {

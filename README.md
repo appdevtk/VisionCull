@@ -1,6 +1,6 @@
 # VisionCull
 
-VisionCull is a native macOS app and Swift CLI for reviewing and tagging photos locally. Apple Vision proposes motifs, a category, and a short caption assembled from its recognized labels. You can edit those suggestions, approve a batch, and export XMP sidecars while keeping the original image files intact.
+VisionCull is a native macOS app and Swift CLI for reviewing and tagging photos locally. Apple Vision proposes motifs, a category, and a short caption assembled from its recognized labels. You can edit those suggestions and searchable topics, moods, and styles, approve a batch, and export XMP sidecars while keeping the original image files intact.
 
 ## Build and run
 
@@ -18,9 +18,13 @@ The build is ad-hoc signed for development. Distribution to other Macs may requi
 ## Review photos
 
 1. Choose **Open → Folder** and select a directory. VisionCull scans supported images recursively. **Find Similar Photos** is an optional scan setting that adds Vision feature prints and a similar-photo strip to the review.
-2. Review the images in the sidebar. Edit motifs, category, caption, capture date, and GPS and use **Save Edits**. Existing EXIF, IPTC, XMP, and Apple Photos metadata can populate these fields. Capture dates without a timezone remain unzoned. Missing date and GPS are left blank.
+2. Review the images in the sidebar. Edit motifs, category, topics, moods, styles, star rating, caption, capture date, and GPS and use **Save Edits**. Existing EXIF, IPTC, XMP, and Apple Photos metadata can populate these fields. Capture dates without a timezone remain unzoned. Missing date and GPS are left blank.
 3. Mark the photos you reviewed and choose **Approve Marked**. Saving another edit clears an earlier approval.
 4. Choose **Export → XMP**. Export to a separate folder to keep the source folder untouched. Subfolders are preserved. **Save Review** keeps edits and approvals in a JSON file you can reopen.
+
+The **Aesthetics** panel shows the Apple Vision score (−1 to +1), the utility-image flag when present, and color and tone estimates from a downsized sRGB preview. It includes brightness, contrast, saturation, deep shadows, near-white highlights, and a small palette. Topics group recognized subjects and scenes. Mood suggestions are based on visual cues such as low contrast or vivid color, and can be edited like any other tag. Your star rating is a separate, manual choice.
+
+Search the sidebar by topic, mood, style, or other photo text. Multiple words can match different fields. Older review JSON files still open. A fresh scan generates the new suggestions and upgrades the analysis cache.
 
 Existing, different XMP files are preserved. If they already exist or two inputs share a sidecar name, resolve the conflict or choose a fresh export location. The app rejects a reviewed file that changed before export. Review JSON files contain local file paths and may contain GPS.
 
@@ -40,7 +44,7 @@ Choose an approved photo and explicitly select **Update Existing** or **Upload N
 
 - **Update existing:** Supply the exact Immich asset UUID. VisionCull verifies its checksum against the local original before updating metadata. If the checksum differs, verify the original in Immich before trying again.
 - **Upload new:** Supply a target album UUID. VisionCull checks for an existing checksum before sending the image. A duplicate result asks you to verify the returned asset ID and then explicitly choose Update. If an upload succeeds and a later step fails, the error includes the new asset ID so you can finish with Update and the album UUID.
-- VisionCull adds confirmed motifs and category as Immich tags and leaves other tags intact. It omits blank metadata. To send an edited capture time to Immich, include an explicit timezone offset. The server URL must use HTTPS, with HTTP accepted on loopback for local testing.
+- VisionCull adds confirmed motifs and category as Immich tags. Topics, moods, and styles use searchable paths such as `VisionCull/Topics/Travel`, `VisionCull/Moods/Calm`, and `VisionCull/Styles/Warm tones`. The same paths are exported as XMP keywords. A confirmed star rating becomes the Immich rating and `xmp:Rating`. Existing Immich tags are preserved, and empty fields are skipped. To send an edited capture time to Immich, include an explicit timezone offset. The server URL must use HTTPS, with HTTP accepted on loopback for local testing.
 
 ### CLI example
 
@@ -48,7 +52,9 @@ Choose an approved photo and explicitly select **Update Existing** or **Upload N
 dist/visioncull scan ~/Pictures/Test --duplicates --review review.json
 dist/visioncull preview review.json
 dist/visioncull edit review.json 'day-1/IMG_001.jpg' \
-  --subjects 'garden,flowers' --category Nature --description 'Flowers beside a path'
+  --subjects 'garden,flowers' --category Nature --description 'Flowers beside a path' \
+  --topics 'Flowers & gardens' --moods 'Calm' --styles 'Soft contrast' --rating 4
+dist/visioncull preview review.json --search 'garden calm'
 dist/visioncull approve review.json 'day-1/IMG_001.jpg'
 dist/visioncull export review.json --output ./xmp-export
 ```

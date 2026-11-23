@@ -69,6 +69,47 @@ final class ImmichTests: XCTestCase {
         try await client.update(photo, assetID: asset)
     }
 
+    func testConfirmedSearchTagsAndStarsReachTheVerifiedAsset() async throws {
+        let asset = UUID()
+        let topicID = UUID()
+        let moodID = UUID()
+        let styleID = UUID()
+        let relatedParent = UUID()
+        let existing = ["id": moodID.uuidString, "value": "VisionCull/Moods/Calm"]
+        let topic = ["id": topicID.uuidString, "value": "VisionCull/Topics/Travel"]
+        let style = ["id": styleID.uuidString, "value": "VisionCull/Styles/Warm tones"]
+        var photo = try makePhoto()
+        photo.metadata = PhotoMetadata(topics: ["Travel"], moods: ["Calm"], styles: ["Warm tones"], rating: 4)
+        let associated = AttachmentRecord()
+        let client = try client { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("PUT", "/api/assets/\(asset)"):
+                let values = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.requestBody(request)) as? [String: Int])
+                XCTAssertEqual(values, ["rating": 4])
+            case ("PUT", "/api/tags"):
+                let values = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.requestBody(request)) as? [String: [String]])
+                XCTAssertEqual(values["tags"], [topic["value"]!, style["value"]!])
+                return [topic, style, ["id": relatedParent.uuidString, "value": "VisionCull/Topics"]]
+            case ("PUT", "/api/tags/assets"):
+                let values = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.requestBody(request)) as? [String: [String]])
+                XCTAssertEqual(values["assetIds"], [asset.uuidString])
+                XCTAssertEqual(Set(values["tagIds"] ?? []), Set([topicID.uuidString, styleID.uuidString]))
+                associated.set()
+                return ["count": 2]
+            case ("GET", "/api/assets/\(asset)"):
+                break
+            default:
+                XCTFail("Unexpected request: \(request)")
+            }
+            return [
+                "id": asset.uuidString, "checksum": "test-checksum", "type": "IMAGE", "isTrashed": false,
+                "tags": associated.value ? [existing, topic, style] : [existing],
+            ]
+        }
+        try await client.update(photo, assetID: asset)
+        XCTAssertTrue(associated.value)
+    }
+
     func testExplicitNewUploadIsAttachedToTheRequestedAlbum() async throws {
         let asset = UUID()
         let album = UUID()

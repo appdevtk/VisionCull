@@ -11,7 +11,7 @@ public struct LocalVisionAnalyzer: PhotoAnalyzer {
     }
 
     public var cacheVersion: String {
-        "vision-classification-1/\(ProcessInfo.processInfo.operatingSystemVersionString)/duplicates=\(includeDuplicates)"
+        "vision-classification-2/\(ProcessInfo.processInfo.operatingSystemVersionString)/duplicates=\(includeDuplicates)"
     }
 
     public func analyze(_ file: URL) throws -> ImageAnalysis {
@@ -47,16 +47,40 @@ public struct LocalVisionAnalyzer: PhotoAnalyzer {
                 default: break
                 }
             }
+            let visual = ImageAppearance.read(file)
+            let aestheticResult = aesthetic.results?.first
             return ImageAnalysis(
                 subjects: subjects, category: category,
                 description: subjects.isEmpty ? "" : "Photo showing " + subjects.prefix(3).joined(separator: ", ") + ".",
-                aestheticScore: aesthetic.results?.first?.overallScore,
-                featurePrint: vector
+                aestheticScore: aestheticResult?.overallScore, featurePrint: vector,
+                topics: Self.topics(for: Array(labels.prefix(12))), moods: visual?.moodSuggestions,
+                styles: visual?.styleSuggestions, isUtility: aestheticResult?.isUtility, appearance: visual
             )
         }
         #else
         throw WorkflowError.message("Apple Vision analysis is available on macOS 15 or later.")
         #endif
+    }
+
+    static func topics(for labels: [String]) -> [String] {
+        let rules = [
+            ("Celebrations", ["celebration", "party", "wedding", "birthday", "festival", "fireworks"]),
+            ("Music & performance", ["concert", "music", "musical", "stage", "dance", "theater"]),
+            ("People & portraits", ["person", "people", "portrait", "human", "child", "selfie"]),
+            ("Food & drink", ["food", "meal", "dish", "coffee", "dessert", "restaurant", "fruit", "cuisine"]),
+            ("Animals", ["animal", "pet", "dog", "cat", "bird", "wildlife", "horse"]),
+            ("Flowers & gardens", ["flower", "flowers", "garden", "gardening", "bouquet", "floristry", "blossom"]),
+            ("Nature & outdoors", ["forest", "outdoor", "outdoors", "landscape", "mountain", "beach", "ocean", "lake", "hiking"]),
+            ("Cities & architecture", ["city", "building", "architecture", "street", "urban", "skyscraper", "town"]),
+            ("Sports & movement", ["sport", "sports", "athletics", "football", "cycling", "running", "skiing", "swimming"]),
+            ("Night & twilight", ["night", "sunset", "sunrise", "dusk", "twilight", "dawn"])
+        ]
+        let words = labelWords(labels)
+        return Array(rules.filter { words.contains(where: $0.1.contains) }.prefix(4).map(\.0))
+    }
+
+    private static func labelWords(_ labels: [String]) -> Set<String> {
+        Set(labels.flatMap { $0.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init) })
     }
 
     private static func category(for subjects: [String]) -> String {
@@ -68,8 +92,8 @@ public struct LocalVisionAnalyzer: PhotoAnalyzer {
             ("Architecture", ["building", "architecture", "interior", "city"]),
             ("Nature", ["outdoor", "mountain", "forest", "landscape", "beach", "water"]),
         ]
-        let words = Set(subjects.flatMap { $0.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init) })
-        return rules.first { !$0.1.allSatisfy { !words.contains($0) } }?.0 ?? (subjects.first ?? "")
+        let words = labelWords(subjects)
+        return rules.first { words.contains(where: $0.1.contains) }?.0 ?? (subjects.first ?? "")
     }
 }
 

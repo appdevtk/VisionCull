@@ -11,7 +11,7 @@ public enum SidecarTarget: Sendable {
 public enum XMP {
     public static func document(for metadata: PhotoMetadata) throws -> Data {
         let value = try metadata.validated()
-        let keywords = try value.subjects.map { "<rdf:li>\(try escape($0))</rdf:li>" }.joined()
+        let keywords = try (value.subjects + value.structuredKeywords).map { "<rdf:li>\(try escape($0))</rdf:li>" }.joined()
         let category = try escape(value.category)
         let description = try escape(value.description)
         let date = try escape(value.capturedAt)
@@ -37,7 +37,7 @@ public enum XMP {
               \(category.isEmpty ? "" : "<vc:Category>\(category)</vc:Category>")
               \(category.isEmpty ? "" : "<photoshop:SupplementalCategories><rdf:Bag><rdf:li>\(category)</rdf:li></rdf:Bag></photoshop:SupplementalCategories>")
               \(date.isEmpty ? "" : "<exif:DateTimeOriginal>\(date)</exif:DateTimeOriginal><xmp:CreateDate>\(date)</xmp:CreateDate>")
-              \(gps)
+              \(gps)\(value.rating.map { "<xmp:Rating>\($0)</xmp:Rating>" } ?? "")
             </rdf:Description>
           </rdf:RDF>
         </x:xmpmeta>
@@ -51,6 +51,7 @@ public enum XMP {
         }
         let parser = XMLParser(data: data)
         parser.shouldProcessNamespaces = true
+        parser.shouldReportNamespacePrefixes = true
         parser.shouldResolveExternalEntities = false
         let reader = XMPReader()
         parser.delegate = reader
@@ -241,7 +242,7 @@ private final class XMPReader: NSObject, XMLParserDelegate {
         guard !text.isEmpty else { return }
         if value.namespace == rdf && name == "li" {
             if stack.contains(where: { $0.namespace == dc && $0.name == "subject" }) {
-                metadata.subjects.append(text)
+                metadata.addKeyword(text)
             } else if stack.contains(where: { $0.namespace == dc && $0.name == "description" }),
                       defaultLanguage || (!preferredDescription && metadata.description.isEmpty) {
                 metadata.description = text
@@ -260,6 +261,8 @@ private final class XMPReader: NSObject, XMLParserDelegate {
         switch (namespace, name) {
         case (exif, "DateTimeOriginal"): metadata.capturedAt = text
         case ("http://ns.adobe.com/xap/1.0/", "CreateDate") where metadata.capturedAt.isEmpty: metadata.capturedAt = text
+        case ("http://ns.adobe.com/xap/1.0/", "Rating"):
+            if let stars = Int(text), (1...5).contains(stars) { metadata.rating = stars }
         case (exif, "GPSLatitude"): latitude = Self.parseCoordinate(text, positive: "N", negative: "S")
         case (exif, "GPSLongitude"): longitude = Self.parseCoordinate(text, positive: "E", negative: "W")
         case ("https://visioncull.dev/ns/1.0/", "Category"),

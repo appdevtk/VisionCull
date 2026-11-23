@@ -26,12 +26,18 @@ private enum ReviewFilter: String, CaseIterable {
 private struct MetadataDraft: Equatable {
     var metadata: PhotoMetadata
     var keywords: String
+    var topics: String
+    var moods: String
+    var styles: String
     var latitude: String
     var longitude: String
 
     init(_ metadata: PhotoMetadata) {
         self.metadata = metadata
         keywords = metadata.subjects.joined(separator: ", ")
+        topics = metadata.topics.joined(separator: ", ")
+        moods = metadata.moods.joined(separator: ", ")
+        styles = metadata.styles.joined(separator: ", ")
         latitude = metadata.latitude.map { String($0) } ?? ""
         longitude = metadata.longitude.map { String($0) } ?? ""
     }
@@ -39,6 +45,9 @@ private struct MetadataDraft: Equatable {
     func value() throws -> PhotoMetadata {
         var result = metadata
         result.subjects = keywords.components(separatedBy: ",")
+        result.topics = topics.components(separatedBy: ",")
+        result.moods = moods.components(separatedBy: ",")
+        result.styles = styles.components(separatedBy: ",")
         let lat = latitude.trimmingCharacters(in: .whitespacesAndNewlines)
         let lon = longitude.trimmingCharacters(in: .whitespacesAndNewlines)
         result.latitude = lat.isEmpty ? nil : Double(lat)
@@ -223,9 +232,7 @@ private struct WorkspaceView: View {
             case .approved: matches = photo.approved
             case .similar: matches = workspace.matches[photo.id] != nil
             }
-            return matches && (query.isEmpty || photo.relativePath.localizedCaseInsensitiveContains(query)
-                || photo.metadata.subjects.joined(separator: " ").localizedCaseInsensitiveContains(query)
-                || photo.metadata.category.localizedCaseInsensitiveContains(query))
+            return matches && (query.isEmpty || photo.matchesSearch(query))
         }
     }
 
@@ -273,7 +280,7 @@ private struct WorkspaceView: View {
                 .padding(10)
             }
             .navigationSplitViewColumnWidth(min: 260, ideal: 315)
-            .searchable(text: $query, placement: .sidebar, prompt: "Find photos or keywords")
+            .searchable(text: $query, placement: .sidebar, prompt: "Find photos, topics or moods")
         } detail: {
             VStack(spacing: 0) {
                 if let entry = photos.first(where: { $0.id == workspace.selection }) {
@@ -430,40 +437,9 @@ private struct PhotoInspector: View {
                         }
                     }
                 }
-                HStack {
-                    Text("Metadata").font(.headline)
-                    Spacer()
-                    if let score = entry.analysis.aestheticScore {
-                        Text("Vision score \(score, format: .number.precision(.fractionLength(2)))")
-                            .foregroundStyle(.secondary).font(.callout)
-                    }
-                }
-                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
-                    GridRow {
-                        Text("Motifs")
-                        TextField("Comma-separated keywords", text: draft.keywords).labelsHidden()
-                    }
-                    GridRow {
-                        Text("Category")
-                        TextField("Category", text: draft.metadata.category).labelsHidden()
-                    }
-                    GridRow {
-                        Text("Description")
-                        TextField("Short description", text: draft.metadata.description, axis: .vertical)
-                            .labelsHidden().lineLimit(2...4)
-                    }
-                    GridRow {
-                        Text("Capture date")
-                        TextField("YYYY-MM-DD or YYYY-MM-DDThh:mm:ss±hh:mm", text: draft.metadata.capturedAt).labelsHidden()
-                    }
-                    GridRow {
-                        Text("GPS")
-                        HStack {
-                            TextField("Latitude", text: draft.latitude)
-                            TextField("Longitude", text: draft.longitude)
-                        }
-                    }
-                }
+                AestheticSummary(analysis: entry.analysis)
+                Text("Metadata").font(.headline)
+                metadataFields
                 HStack {
                     Button("Use Original Metadata") { draft.wrappedValue = MetadataDraft(entry.existing) }
                     Button("Save Edits", action: save).buttonStyle(.borderedProminent).disabled(!dirty)
@@ -488,12 +464,132 @@ private struct PhotoInspector: View {
         .sheet(isPresented: $showImmich) { ImmichSheet(photo: entry) }
     }
 
+    private var metadataFields: some View {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
+            GridRow {
+                Text("Motifs")
+                TextField("Comma-separated keywords", text: draft.keywords).labelsHidden()
+            }
+            GridRow {
+                Text("Topics")
+                TextField("e.g. Street photography, Travel", text: draft.topics).labelsHidden()
+            }
+            GridRow {
+                Text("Moods")
+                TextField("e.g. Calm, Dramatic", text: draft.moods).labelsHidden()
+            }
+            GridRow {
+                Text("Styles")
+                TextField("e.g. Warm tones, High contrast", text: draft.styles).labelsHidden()
+            }
+            GridRow {
+                Text("Star rating")
+                Picker("Star rating", selection: draft.metadata.rating) {
+                    Text("Unrated").tag(nil as Int?)
+                    ForEach(1...5, id: \.self) { stars in
+                        Text("\(stars) / 5").tag(stars as Int?)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            GridRow {
+                Text("Category")
+                TextField("Category", text: draft.metadata.category).labelsHidden()
+            }
+            GridRow {
+                Text("Description")
+                TextField("Short description", text: draft.metadata.description, axis: .vertical)
+                    .labelsHidden().lineLimit(2...4)
+            }
+            GridRow {
+                Text("Capture date")
+                TextField("YYYY-MM-DD or YYYY-MM-DDThh:mm:ss±hh:mm", text: draft.metadata.capturedAt).labelsHidden()
+            }
+            GridRow {
+                Text("GPS")
+                HStack {
+                    TextField("Latitude", text: draft.latitude)
+                    TextField("Longitude", text: draft.longitude)
+                }
+            }
+        }
+    }
+
     private var dirty: Bool { workspace.drafts[entry.id] != nil }
 
     private func save() {
         do {
             try workspace.apply(draft.wrappedValue.value(), to: entry.id)
         } catch { workspace.alert = error.localizedDescription }
+    }
+}
+
+private struct AestheticSummary: View {
+    let analysis: ImageAnalysis
+
+    var body: some View {
+        if analysis.aestheticScore != nil || analysis.appearance != nil {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Aesthetics").font(.headline)
+                    Spacer()
+                    if let score = analysis.aestheticScore {
+                        Text("Vision score \(score, format: .number.precision(.fractionLength(2)))")
+                            .help("Apple Vision’s score from −1 to +1. Set your own stars below.")
+                    }
+                }
+                if analysis.isUtility == true {
+                    Label("Utility image according to Vision", systemImage: "doc.viewfinder")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                if let appearance = analysis.appearance {
+                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                        GridRow {
+                            metric("Brightness", appearance.brightness)
+                            metric("Contrast", appearance.contrast)
+                            metric("Saturation", appearance.saturation)
+                        }
+                        GridRow {
+                            metric("Deep shadows", appearance.shadowFraction)
+                            metric("Near-white highlights", appearance.highlightFraction)
+                            Text("Palette: \(paletteTone(appearance.warmth))")
+                        }
+                    }
+                    .font(.callout)
+                    .help("Estimated from a small preview. Contrast measures the central luma range.")
+                    if !appearance.palette.isEmpty {
+                        HStack(spacing: 10) {
+                            ForEach(appearance.palette, id: \.self) { hex in
+                                HStack(spacing: 4) {
+                                    Circle().fill(swatch(hex)).overlay { Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1) }
+                                        .frame(width: 12, height: 12).accessibilityHidden(true)
+                                    Text(hex).font(.caption.monospaced())
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func metric(_ title: String, _ value: Double) -> some View {
+        Text("\(title): \(value, format: .percent.precision(.fractionLength(0)))")
+    }
+
+    private func paletteTone(_ warmth: Double) -> String {
+        if warmth >= 0.10 { return "Warm" }
+        if warmth <= -0.10 { return "Cool" }
+        return "Neutral"
+    }
+
+    private func swatch(_ hex: String) -> Color {
+        let rgb = UInt32(hex.dropFirst(), radix: 16) ?? 0
+        return Color(red: Double((rgb >> 16) & 255) / 255, green: Double((rgb >> 8) & 255) / 255, blue: Double(rgb & 255) / 255)
     }
 }
 

@@ -15,7 +15,7 @@ enum EmbeddedMetadata {
             let gps = props[kCGImagePropertyGPSDictionary as String] as? [String: Any] ?? [:]
             let date = exif["DateTimeOriginal"] as? String ?? tiff["DateTime"] as? String ?? ""
             metadata.capturedAt = exifDate(date, offset: exif["OffsetTimeOriginal"] as? String)
-            metadata.subjects = iptc["Keywords"] as? [String] ?? []
+            for keyword in iptc["Keywords"] as? [String] ?? [] { metadata.addKeyword(keyword) }
             metadata.category = iptc["Category"] as? String ?? ""
             metadata.description = iptc["Caption/Abstract"] as? String ?? tiff["ImageDescription"] as? String ?? ""
             if let lat = gps["Latitude"] as? Double, let lon = gps["Longitude"] as? Double,
@@ -61,6 +61,10 @@ enum EmbeddedMetadata {
         if !incoming.category.isEmpty { metadata.category = incoming.category }
         if !incoming.description.isEmpty { metadata.description = incoming.description }
         if !incoming.capturedAt.isEmpty { metadata.capturedAt = incoming.capturedAt }
+        if !incoming.topics.isEmpty { metadata.topics = incoming.topics }
+        if !incoming.moods.isEmpty { metadata.moods = incoming.moods }
+        if !incoming.styles.isEmpty { metadata.styles = incoming.styles }
+        if let stars = incoming.rating { metadata.rating = stars }
         if let lat = incoming.latitude, let lon = incoming.longitude {
             metadata.latitude = lat
             metadata.longitude = lon

@@ -13,8 +13,9 @@ struct Command {
 
       visioncull scan FOLDER --review REVIEW.json [--cache DIR] [--duplicates] [--metadata-only]
       visioncull photos --review REVIEW.json [--cache DIR] [--limit N] [--offset N] [--icloud] [--duplicates]
-      visioncull preview REVIEW.json
+      visioncull preview REVIEW.json [--search QUERY]
       visioncull edit REVIEW.json PHOTO [--subjects A,B] [--category NAME] [--description TEXT]
+                     [--topics A,B] [--moods A,B] [--styles A,B] [--rating 0…5]
                      [--date ISO-8601] [--latitude DECIMAL --longitude DECIMAL | --clear-gps]
       visioncull approve REVIEW.json (--all | PHOTO...)
       visioncull export REVIEW.json (--alongside | --output DIR)
@@ -22,6 +23,7 @@ struct Command {
       visioncull immich upload REVIEW.json PHOTO --server URL --album UUID
 
     PHOTO is an exact relative path or ID from preview. Edits clear prior approval.
+    Use a rating of 0 to clear stars in the review.
     Immich reads IMMICH_API_KEY from the environment. Upload sends only the named approved image.
     """
 
@@ -70,22 +72,35 @@ struct Command {
             print("\(review.photos.count) photos, \(review.analyzed) analyzed, \(review.reused) cached, \(review.issues.count) issues")
             for issue in review.issues { print("! \(issue.path): \(issue.message)") }
         case "preview":
-            let options = try Options(args)
+            let options = try Options(args, values: ["--search"])
             try options.expect(1)
             let review = try Review.read(file(options.positionals[0]))
-            for entry in review.photos {
+            let query = options.value("--search") ?? ""
+            let matches = review.photos.filter { $0.matchesSearch(query) }
+            for entry in matches {
                 let value = entry.metadata
                 let coords = value.latitude.flatMap { lat in value.longitude.map { "\(lat), \($0)" } } ?? ""
                 print("[\(entry.approved ? "approved" : "pending")] \(entry.relativePath)")
                 print("  \(value.category) | \(value.subjects.joined(separator: ", ")) | \(value.description)")
                 if !value.capturedAt.isEmpty || !coords.isEmpty { print("  \(value.capturedAt) \(coords)") }
-                if let score = entry.analysis.aestheticScore { print("  Vision score: \(score)") }
+                if !value.topics.isEmpty { print("  Topics: \(value.topics.joined(separator: ", "))") }
+                if !value.moods.isEmpty { print("  Moods: \(value.moods.joined(separator: ", "))") }
+                if !value.styles.isEmpty { print("  Styles: \(value.styles.joined(separator: ", "))") }
+                if let rating = value.rating { print("  Stars: \(rating)/5") }
+                printAppearance(entry.analysis)
             }
-            let names = Dictionary(review.photos.map { ($0.id, $0.relativePath) }, uniquingKeysWith: { first, _ in first })
-            for group in review.duplicateGroups() { print("Similar: \(group.compactMap { names[$0] }.joined(separator: " | "))") }
+            let names = Dictionary(matches.map { ($0.id, $0.relativePath) }, uniquingKeysWith: { first, _ in first })
+            if matches.isEmpty && !query.isEmpty { print("No photos matched.") }
+            for group in review.duplicateGroups() {
+                let paths = group.compactMap { names[$0] }
+                if paths.count > 1 { print("Similar: \(paths.joined(separator: " | "))") }
+            }
             for issue in review.issues { print("! \(issue.path): \(issue.message)") }
         case "edit":
-            try edit(Options(args, values: ["--subjects", "--category", "--description", "--date", "--latitude", "--longitude"], flags: ["--clear-gps"]))
+            try edit(Options(args, values: [
+                "--subjects", "--category", "--description", "--date", "--latitude", "--longitude",
+                "--topics", "--moods", "--styles", "--rating",
+            ], flags: ["--clear-gps"]))
         case "approve":
             let options = try Options(args, flags: ["--all"])
             guard let path = options.positionals.first, options.has("--all") == (options.positionals.count == 1) else {
@@ -118,6 +133,15 @@ struct Command {
         }
     }
 
+    private static func printAppearance(_ analysis: ImageAnalysis) {
+        if let score = analysis.aestheticScore { print("  Vision score: \(score)") }
+        if analysis.isUtility == true { print("  Vision considers this a utility image.") }
+        guard let look = analysis.appearance else { return }
+        let percent = FloatingPointFormatStyle<Double>.Percent.percent.precision(.fractionLength(0))
+        print("  Brightness \(look.brightness.formatted(percent)) | Contrast \(look.contrast.formatted(percent)) | Saturation \(look.saturation.formatted(percent))")
+        print("  Deep shadows \(look.shadowFraction.formatted(percent)) | Near-white highlights \(look.highlightFraction.formatted(percent)) | Palette \(look.palette.joined(separator: " "))")
+    }
+
     private static func edit(_ options: Options) throws {
         try options.expect(2)
         let url = file(options.positionals[0])
@@ -125,6 +149,15 @@ struct Command {
         let i = try index(options.positionals[1], in: review)
         var data = review.photos[i].metadata
         if let value = options.value("--subjects") { data.subjects = value.components(separatedBy: ",") }
+        if let value = options.value("--topics") { data.topics = value.components(separatedBy: ",") }
+        if let value = options.value("--moods") { data.moods = value.components(separatedBy: ",") }
+        if let value = options.value("--styles") { data.styles = value.components(separatedBy: ",") }
+        if let value = options.value("--rating") {
+            guard let rating = Int(value), (0...5).contains(rating) else {
+                throw WorkflowError.message("--rating must be 0 through 5.")
+            }
+            data.rating = rating == 0 ? nil : rating
+        }
         if let value = options.value("--category") { data.category = value }
         if let value = options.value("--description") { data.description = value }
         if let value = options.value("--date") { data.capturedAt = value }

@@ -163,6 +163,7 @@ public final class ImmichClient: Sendable {
         var patch: [String: Any] = [:]
         if !metadata.description.isEmpty { patch["description"] = metadata.description }
         if !metadata.capturedAt.isEmpty { patch["dateTimeOriginal"] = metadata.capturedAt }
+        if let rating = metadata.rating { patch["rating"] = rating }
         if let lat = metadata.latitude, let lon = metadata.longitude {
             patch["latitude"] = lat
             patch["longitude"] = lon
@@ -173,15 +174,17 @@ public final class ImmichClient: Sendable {
         }
 
         var seen = Set((current.tags ?? []).map { $0.value.lowercased() })
-        let tags = (metadata.subjects + [metadata.category]).filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+        let candidates = metadata.subjects + [metadata.category] + metadata.structuredKeywords
+        let tags = candidates.filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
         if !tags.isEmpty {
-            let tagIDs: [Tag] = try await send("PUT", "tags", body: ["tags": tags])
-            let ids = tagIDs.map { $0.id.uuidString }
-            guard Set(tagIDs.map { $0.value.lowercased() }) == Set(tags.map { $0.lowercased() }) else {
+            let returned: [Tag] = try await send("PUT", "tags", body: ["tags": tags])
+            let requested = Set(tags.map { $0.lowercased() })
+            let matched = returned.filter { requested.contains($0.value.lowercased()) }
+            guard Set(matched.map { $0.value.lowercased() }) == requested, matched.count == requested.count else {
                 throw WorkflowError.message("Immich did not return every requested tag.")
             }
             let _: TagResult = try await send(
-                "PUT", "tags/assets", body: ["assetIds": [asset.uuidString], "tagIds": ids]
+                "PUT", "tags/assets", body: ["assetIds": [asset.uuidString], "tagIds": matched.map { $0.id.uuidString }]
             )
             let verified: Asset = try await send("GET", "assets/\(asset.uuidString)")
             let values = Set((verified.tags ?? []).map { $0.value.lowercased() })
