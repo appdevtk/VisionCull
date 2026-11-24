@@ -56,7 +56,7 @@ Choose an approved photo and explicitly select **Update Existing** or **Upload N
 
 ### Saved searches, comparison, and content
 
-- **Tools → Saved Searches** combines text, topics, moods, styles, and minimum stars. Apply a filter, mark its results, and use **Edit Marked Photos** to add tags or set stars for the batch. Edits go back to Pending before they can be sent.
+- **Tools → Saved Searches** combines text, topics, moods, styles, and minimum stars. Apply a filter, mark its results, and use **Edit Marked Photos** to add, remove, or replace tags and set stars for the batch. Edits go back to Pending before they can be sent.
 - **Tools → Tag Synonyms** stores your preferred spelling. The duplicate check lists close pairs in the open review or the Immich tag catalog. Choose **Use as Alias**, adjust the two names if needed, and save the rule. Applying aliases at approval normalizes the review. Immich looks for an existing tag ID when syncing.
 - **Compare Photos** in the inspector opens similar photos side by side. You can also pick two photos manually. Zoom and drag are linked. The detail score is an estimate from a downsized preview, so it is most useful for comparing the same scene. Choose a favorite to store it in the review. A fresh scan adds detail values to older photos.
 - **Tools → Find by Content** ranks the open review by a description or a reference photo. Text searches use Vision's recognized concepts and local language embeddings when available. Reference search uses Vision feature prints. Mark interesting results to tag them together. A first reference search caches any missing feature prints locally.

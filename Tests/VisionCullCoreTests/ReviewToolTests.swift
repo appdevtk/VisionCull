@@ -25,6 +25,14 @@ final class ReviewToolTests: XCTestCase {
         XCTAssertEqual(edited.photos[0].metadata.rating, 5)
         XCTAssertFalse(edited.photos[0].approved)
         XCTAssertEqual(edited.photos[1], second)
+        let duplicate = try BatchMetadataEdit(moods: ["Filmlook"]).applying(to: review, ids: ["one"], aliases: preferences.aliases)
+        XCTAssertEqual(duplicate.photos[0], first)
+        let removed = try BatchMetadataEdit(moods: ["Filmlook"], operation: .remove).applying(to: review, ids: ["one"], aliases: preferences.aliases)
+        XCTAssertTrue(removed.photos[0].metadata.moods.isEmpty)
+        XCTAssertFalse(removed.photos[0].approved)
+        let replaced = try BatchMetadataEdit(styles: ["Saturated"], operation: .replace).applying(to: edited, ids: ["one"])
+        XCTAssertEqual(replaced.photos[0].metadata.styles, ["Saturated"])
+        XCTAssertEqual(replaced.photos[0].metadata.topics, ["Travel"])
         XCTAssertThrowsError(try BatchMetadataEdit(moods: ["invalid/tag"]).applying(to: review, ids: ["one"]))
     }
 

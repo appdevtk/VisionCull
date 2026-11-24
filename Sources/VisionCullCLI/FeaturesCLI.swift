@@ -64,18 +64,21 @@ extension Command {
 
     static func batchEdit(_ args: [String]) throws {
         let options = try Options(
-            args, values: ["--cache", "--preset", "--topics", "--moods", "--styles", "--rating"], flags: ["--all"]
+            args, values: ["--cache", "--preset", "--topics", "--moods", "--styles", "--rating", "--tag-mode"], flags: ["--all"]
         )
         guard let path = options.positionals.first else { throw WorkflowError.message("Specify a review file.") }
         let url = file(path)
         let revision = try FileRevision.read(url)
         let review = try Review.read(url)
         let photos = try selectedPhotos(options, review: review)
+        guard let operation = BatchMetadataEdit.Operation(rawValue: options.value("--tag-mode") ?? "add") else {
+            throw WorkflowError.message("--tag-mode must be add, remove, or replace.")
+        }
         let edit = BatchMetadataEdit(
             topics: terms(options, "--topics"), moods: terms(options, "--moods"), styles: terms(options, "--styles"),
-            rating: try rating(options, "--rating")
+            rating: try rating(options, "--rating"), operation: operation
         )
-        let updated = try edit.applying(to: review, ids: Set(photos.map(\.id)))
+        let updated = try edit.applying(to: review, ids: Set(photos.map(\.id)), aliases: preferences(options).aliases)
         try write(updated, to: url, revision: revision)
         print("Reviewed edits for \(photos.count) selected photos.")
     }

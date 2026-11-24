@@ -162,10 +162,10 @@ private final class Workspace: ObservableObject {
         }
     }
 
-    func applyBatchEdit(_ edit: BatchMetadataEdit) throws {
+    func applyBatchEdit(_ edit: BatchMetadataEdit, aliases: [TagAlias]) throws {
         guard let review else { return }
         guard drafts.isEmpty else { throw WorkflowError.message("Save or discard unsaved metadata edits first.") }
-        self.review = try edit.applying(to: review, ids: marked)
+        self.review = try edit.applying(to: review, ids: marked, aliases: aliases)
         status = "Applied edits to \(marked.count) marked photos."
     }
 
@@ -398,7 +398,10 @@ private struct WorkspaceView: View {
             switch panel {
             case .searches: SavedSearchPanel(preferences: $preferences) { savedSearch = $0 }
             case .tags: TagAliasPanel(preferences: $preferences, photos: photos)
-            case .editing: BatchEditPanel(count: workspace.marked.count, apply: workspace.applyBatchEdit)
+            case .editing:
+                BatchEditPanel(count: workspace.marked.count) { edit in
+                    try workspace.applyBatchEdit(edit, aliases: preferences.aliases)
+                }
             case .content: ContentSearchPanel(photos: photos) { workspace.marked.formUnion($0) }
             case .immich: ImmichBatchPanel(photos: photos.filter { workspace.marked.contains($0.id) }, aliases: preferences.aliases)
             }

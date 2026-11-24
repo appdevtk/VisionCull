@@ -203,15 +203,21 @@ struct BatchEditPanel: View {
     @State private var moods = ""
     @State private var styles = ""
     @State private var stars = -1
+    @State private var operation: BatchMetadataEdit.Operation = .add
     @State private var issue = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Edit \(count) Marked Photos").font(.title2.bold())
             Form {
-                TextField("Add topics (comma-separated)", text: $topics)
-                TextField("Add moods (comma-separated)", text: $moods)
-                TextField("Add styles (comma-separated)", text: $styles)
+                Picker("Tag action", selection: $operation) {
+                    Text("Add Tags").tag(BatchMetadataEdit.Operation.add)
+                    Text("Remove Matching Tags").tag(BatchMetadataEdit.Operation.remove)
+                    Text("Replace Filled Groups").tag(BatchMetadataEdit.Operation.replace)
+                }
+                TextField("Topics (comma-separated)", text: $topics)
+                TextField("Moods (comma-separated)", text: $moods)
+                TextField("Styles (comma-separated)", text: $styles)
                 Picker("Rating", selection: $stars) {
                     Text("Keep current rating").tag(-1)
                     Text("Clear rating").tag(0)
@@ -225,7 +231,7 @@ struct BatchEditPanel: View {
                 Button("Cancel") { dismiss() }
                 Button("Apply Edits") {
                     do {
-                        try apply(BatchMetadataEdit(topics: tagList(topics), moods: tagList(moods), styles: tagList(styles), rating: stars < 0 ? nil : stars))
+                        try apply(BatchMetadataEdit(topics: tagList(topics), moods: tagList(moods), styles: tagList(styles), rating: stars < 0 ? nil : stars, operation: operation))
                         dismiss()
                     } catch { issue = error.localizedDescription }
                 }.keyboardShortcut(.defaultAction)

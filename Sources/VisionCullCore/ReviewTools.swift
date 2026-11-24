@@ -137,25 +137,36 @@ public struct ReviewLibrary: Sendable {
 }
 
 public struct BatchMetadataEdit: Sendable {
+    public enum Operation: String, CaseIterable, Sendable {
+        case add, remove, replace
+    }
+
     public var topics: [String]
     public var moods: [String]
     public var styles: [String]
     public var rating: Int?
+    public var operation: Operation
 
-    public init(topics: [String] = [], moods: [String] = [], styles: [String] = [], rating: Int? = nil) {
+    public init(topics: [String] = [], moods: [String] = [], styles: [String] = [], rating: Int? = nil, operation: Operation = .add) {
         self.topics = topics
         self.moods = moods
         self.styles = styles
         self.rating = rating
+        self.operation = operation
     }
 
-    public func applying(to review: Review, ids: Set<String>) throws -> Review {
+    public func applying(to review: Review, ids: Set<String>, aliases: [TagAlias] = []) throws -> Review {
         var updated = review
+        let rules = TagRules(custom: aliases)
+        let inputs = try PhotoMetadata(topics: topics, moods: moods, styles: styles).validated()
         for i in updated.photos.indices where ids.contains(updated.photos[i].id) {
             var metadata = updated.photos[i].metadata
-            metadata.topics += topics
-            metadata.moods += moods
-            metadata.styles += styles
+            for group in TagGroup.structured {
+                let terms = inputs[keyPath: group.field]
+                if terms.isEmpty { continue }
+                let current = metadata[keyPath: group.field]
+                metadata[keyPath: group.field] = try edit(current, with: terms, in: group, rules: rules)
+            }
             if let rating { metadata.rating = rating == 0 ? nil : rating }
             metadata = try metadata.validated()
             if metadata != updated.photos[i].metadata {
@@ -164,6 +175,18 @@ public struct BatchMetadataEdit: Sendable {
             }
         }
         return updated
+    }
+
+    private func edit(_ current: [String], with terms: [String], in group: TagGroup, rules: TagRules) throws -> [String] {
+        if operation == .remove {
+            return current.filter { name in !terms.contains { rules.equivalent(name, $0, in: group) } }
+        }
+        var result = operation == .replace ? [] : current
+        for term in terms {
+            let match = try rules.resolve(term, in: group, candidates: current + result, enforceUserPreference: operation == .replace)
+            if !result.contains(where: { rules.equivalent(match.name, $0, in: group) }) { result.append(match.name) }
+        }
+        return result
     }
 }
 

@@ -25,6 +25,7 @@ struct Command {
       visioncull search save NAME [--query TEXT --topics A,B --moods A,B --styles A,B --stars N]
       visioncull search list | search run NAME REVIEW.json | search remove NAME
       visioncull batch-edit REVIEW.json (--all | --preset NAME | PHOTO...) [--topics A,B --moods A,B --styles A,B --rating 0…5]
+                          [--tag-mode add|remove|replace]
       visioncull tags alias GROUP ALIAS PREFERRED | tags list | tags remove UUID | tags duplicates REVIEW.json [--server URL]
       visioncull find REVIEW.json (--text QUERY | --image FILE) [--limit N]
       visioncull series REVIEW.json PHOTO [OTHER...] [--favorite PHOTO]
