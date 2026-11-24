@@ -36,7 +36,7 @@ struct ContentSearchPanel: View {
             if let results {
                 List(results.hits) { hit in
                     HStack {
-                        Toggle("Mark \(hit.photo.file.lastPathComponent)", isOn: Binding(
+                        Toggle("Mark \(hit.photo.displayName)", isOn: Binding(
                             get: { checked.contains(hit.id) },
                             set: { if $0 { checked.insert(hit.id) } else { checked.remove(hit.id) } }
                         )).labelsHidden().toggleStyle(.checkbox)

@@ -54,6 +54,24 @@ Choose an approved photo and explicitly select **Update Existing** or **Upload N
 - **Upload new:** Supply a target album UUID. VisionCull checks for an existing checksum before sending the image. A duplicate result asks you to verify the returned asset ID and then explicitly choose Update. If an upload succeeds and a later step fails, the error includes the new asset ID so you can finish with Update and the album UUID.
 - VisionCull reads the server’s tag catalog before sending tags. The API key needs permission to read tags as well as to create and attach them as needed. It reuses matching tags and their IDs, including recognized German and English names. For several uncertain matches, edit the tag in the review and approve again before retrying. VisionCull adds confirmed motifs and category as Immich tags. Topics, moods, and styles use searchable paths such as `VisionCull/Topics/Travel`, `VisionCull/Moods/Calm`, and `VisionCull/Styles/Warm tones`. The same paths are exported as XMP keywords. A confirmed star rating becomes the Immich rating and `xmp:Rating`. Existing Immich tags are preserved, and empty fields are skipped. To send an edited capture time to Immich, include an explicit timezone offset. The server URL must use HTTPS, with HTTP accepted on loopback for local testing.
 
+### Review an Immich album using previews
+
+In the app, choose **Open → Immich Album**, enter the server URL and API key, load the album list, and select **Analyze Previews**. VisionCull downloads the selected album's still-image previews and caches them locally. The original files stay on the server. Text and image analysis run on the Mac. The original capture date, GPS, caption, stars, and tags come from the Immich asset record. The reference search and comparison use the cached preview pixels.
+
+Review, edit, and approve the results as usual. The Immich preview screen shows the bound asset ID before sending. VisionCull verifies the server, original checksum, and scanned asset revision again before updating. A changed asset needs a fresh scan. Sending applies changed, supported metadata fields and attaches confirmed tags. XMP copies go to an export folder. The API key stays in memory during the app session and is never saved with the review.
+
+The API key needs permission to read albums and assets and view their previews. Album pagination on recent Immich versions uses the metadata search endpoint. Sending requires the relevant asset and tag permissions. This path uses Immich's preview API, existing asset IDs, and the same built-in metadata endpoints as the local workflow.
+
+```sh
+dist/visioncull immich albums --server https://immich.example.com
+dist/visioncull immich scan --server https://immich.example.com --album <ALBUM_UUID> --review immich-review.json
+dist/visioncull preview immich-review.json
+dist/visioncull approve immich-review.json --all
+dist/visioncull immich batch immich-review.json --all --server https://immich.example.com
+```
+
+The last command previews the updates. Add `--apply` to send them after checking the output. With a custom `--cache DIR`, use the same directory for scan and approval. Linux can exercise the metadata workflow with `--metadata-only`.
+
 ### Saved searches, comparison, and content
 
 - **Tools → Saved Searches** combines text, topics, moods, styles, and minimum stars. Apply a filter, mark its results, and use **Edit Marked Photos** to add, remove, or replace tags and set stars for the batch. Edits go back to Pending before they can be sent.

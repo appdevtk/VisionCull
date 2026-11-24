@@ -67,8 +67,8 @@ public enum XMP {
         let approved = review.photos.filter(\.approved)
         guard !approved.isEmpty else { throw WorkflowError.message("Approve at least one photo before exporting.") }
         let targets = Dictionary(grouping: try review.photos.compactMap { photo -> (PhotoEntry, URL)? in
-            if case .alongside = target, photo.fromApplePhotos {
-                if photo.approved { throw WorkflowError.message("Choose an export folder for Apple Photos items.") }
+            if case .alongside = target, photo.fromApplePhotos || photo.immichSource != nil {
+                if photo.approved { throw WorkflowError.message("Choose a separate export folder for Apple Photos or Immich items.") }
                 return nil
             }
             return (photo, try destination(for: photo, target: target))

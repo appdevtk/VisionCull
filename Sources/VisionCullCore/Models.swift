@@ -226,13 +226,14 @@ public struct PhotoEntry: Codable, Equatable, Identifiable, Sendable {
     public let existing: PhotoMetadata
     public let analysis: ImageAnalysis
     public let fromApplePhotos: Bool
+    public let immichSource: ImmichPhotoSource?
     public var metadata: PhotoMetadata
     public var approved: Bool
     public var seriesFavorite: Bool? = nil
 
     public init(
         id: String, file: URL, relativePath: String, revision: FileRevision,
-        existing: PhotoMetadata, analysis: ImageAnalysis, fromApplePhotos: Bool = false
+        existing: PhotoMetadata, analysis: ImageAnalysis, fromApplePhotos: Bool = false, immichSource: ImmichPhotoSource? = nil
     ) {
         self.id = id
         self.file = file
@@ -241,8 +242,13 @@ public struct PhotoEntry: Codable, Equatable, Identifiable, Sendable {
         self.existing = existing
         self.analysis = analysis
         self.fromApplePhotos = fromApplePhotos
+        self.immichSource = immichSource
         metadata = existing.proposed(using: analysis)
         approved = false
+    }
+
+    public var displayName: String {
+        relativePath.split(separator: "/").last.map(String.init) ?? file.lastPathComponent
     }
 
     public func matchesSearch(_ query: String) -> Bool {

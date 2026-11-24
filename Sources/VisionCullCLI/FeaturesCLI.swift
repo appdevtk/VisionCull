@@ -123,6 +123,37 @@ extension Command {
         }
     }
 
+    static func immichSource(_ args: [String]) async throws {
+        let scanning = args.first == "scan"
+        let values: Set<String> = scanning ? ["--server", "--cache", "--album", "--review"] : ["--server", "--cache"]
+        let flags: Set<String> = scanning ? ["--duplicates", "--metadata-only"] : []
+        let options = try Options(Array(args.dropFirst()), values: values, flags: flags)
+        try options.expect(0)
+        let client = try remoteClient(options)
+        if !scanning {
+            for album in try await client.albums() {
+                print("\(album.id.uuidString) \(album.albumName) (\(album.assetCount) assets)")
+            }
+            return
+        }
+        #if !os(macOS)
+        guard options.has("--metadata-only") else {
+            throw WorkflowError.message("Apple Vision requires macOS. Use --metadata-only to inspect Immich metadata on Linux.")
+        }
+        #endif
+        let destination = file(try options.required("--review"))
+        guard destination.pathExtension.lowercased() == "json", !FileManager.default.fileExists(atPath: destination.path) else {
+            throw WorkflowError.message("Choose a new .json file for the review.")
+        }
+        let album = try uuid(options.required("--album"), option: "--album")
+        let analyzer: any PhotoAnalyzer = options.has("--metadata-only")
+            ? MetadataOnly() : LocalVisionAnalyzer(includeDuplicates: options.has("--duplicates"))
+        let review = try await client.scanAlbum(album, scanner: PhotoScanner(cacheRoot: cache(options), analyzer: analyzer))
+        try review.write(destination)
+        print("\(review.photos.count) Immich previews, \(review.analyzed) analyzed, \(review.reused) cached, \(review.issues.count) issues")
+        for issue in review.issues { print("! \(issue.path): \(issue.message)") }
+    }
+
     static func immichBatch(_ args: [String]) async throws {
         let options = try Options(args, values: ["--server", "--cache", "--preset", "--map"], flags: ["--all", "--apply"])
         guard let path = options.positionals.first else { throw WorkflowError.message("Specify a review file.") }

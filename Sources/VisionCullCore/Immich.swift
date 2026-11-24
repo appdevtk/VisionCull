@@ -44,7 +44,7 @@ public struct ImmichBatchResult: Identifiable, Sendable {
 }
 
 public final class ImmichClient: Sendable {
-    private let endpoint: URL
+    let endpoint: URL
     private let key: String
     private let load: @Sendable (URLRequest) async throws -> (Data, URLResponse)
     private let sendFile: @Sendable (URLRequest, URL) async throws -> (Data, URLResponse)
@@ -76,7 +76,17 @@ public final class ImmichClient: Sendable {
         }
         let headersAreSafe = !apiKey.isEmpty && apiKey.utf8.allSatisfy { (33...126).contains($0) }
         guard headersAreSafe else { throw WorkflowError.message("Enter a valid Immich API key.") }
-        endpoint = server.lastPathComponent == "api" ? server : server.appendingPathComponent("api")
+        guard var normalized = URLComponents(url: server, resolvingAgainstBaseURL: false) else {
+            throw WorkflowError.message("Invalid Immich server URL.")
+        }
+        normalized.scheme = scheme
+        if !host.contains(":") { normalized.host = host.lowercased() }
+        if (scheme == "https" && normalized.port == 443) || (scheme == "http" && normalized.port == 80) {
+            normalized.port = nil
+        }
+        while normalized.percentEncodedPath.hasSuffix("/") { normalized.percentEncodedPath.removeLast() }
+        guard let base = normalized.url else { throw WorkflowError.message("Invalid Immich server URL.") }
+        endpoint = base.lastPathComponent == "api" ? base : base.appendingPathComponent("api")
         key = apiKey
         self.load = load
         self.sendFile = sendFile
@@ -173,7 +183,38 @@ public final class ImmichClient: Sendable {
 
     private func prepare(_ request: ImmichBatchRequest, updateAlbum: UUID? = nil) async throws -> Prepared {
         let photo = request.photo
-        let metadata = try check(photo)
+        var metadata = try check(photo, requireZonedDate: photo.immichSource == nil)
+        if let source = photo.immichSource {
+            guard source.endpoint == endpoint else {
+                throw WorkflowError.message("This preview belongs to a different Immich server. Reconnect to its source.")
+            }
+            switch request.intent {
+            case .matchExisting: break
+            case .update(let id) where id == source.assetID: break
+            default: throw WorkflowError.message("This preview can only update its original Immich asset.")
+            }
+            guard updateAlbum == nil else {
+                throw WorkflowError.message("Immich previews update metadata for the original asset.")
+            }
+            let asset = try await checkedAsset(source.assetID, checksum: source.originalChecksum)
+            guard asset.updatedAt == source.updatedAt, asset.metadata == photo.existing else {
+                throw WorkflowError.message("This Immich asset changed since the scan. Rescan it before sending metadata.")
+            }
+            let baseline = (try? photo.existing.validated()) ?? photo.existing
+            let tags = try await planTags(for: metadata, current: asset.tags ?? [])
+            if metadata.description == baseline.description { metadata.description = "" }
+            if metadata.capturedAt == baseline.capturedAt { metadata.capturedAt = "" }
+            if metadata.rating == baseline.rating { metadata.rating = nil }
+            if metadata.latitude == baseline.latitude && metadata.longitude == baseline.longitude {
+                metadata.latitude = nil
+                metadata.longitude = nil
+            }
+            try requireImmichDate(metadata)
+            return Prepared(
+                request: request, endpoint: endpoint, metadata: metadata, checksum: source.originalChecksum,
+                asset: asset, album: nil, tags: tags
+            )
+        }
         let checksum = try fingerprint(photo.file)
         guard try FileRevision.read(photo.file) == photo.revision else {
             throw WorkflowError.message("Image changed during checksum verification. Rescan it.")
@@ -235,7 +276,7 @@ public final class ImmichClient: Sendable {
         return result
     }
 
-    private func checkedAsset(_ id: UUID, checksum: String) async throws -> Asset {
+    func checkedAsset(_ id: UUID, checksum: String) async throws -> Asset {
         let asset: Asset = try await send("GET", "assets/\(id.uuidString)")
         guard asset.id == id, asset.checksum == checksum, asset.type == "IMAGE", !asset.isTrashed else {
             throw WorkflowError.message("Asset \(id) does not match the reviewed image checksum, or is unavailable. Confirm the exact asset in Immich.")
@@ -322,16 +363,20 @@ public final class ImmichClient: Sendable {
         }
     }
 
-    private func check(_ photo: PhotoEntry) throws -> PhotoMetadata {
+    private func check(_ photo: PhotoEntry, requireZonedDate: Bool = true) throws -> PhotoMetadata {
         guard photo.approved else { throw WorkflowError.message("Approve this photo before sending it to Immich.") }
         guard try FileRevision.read(photo.file) == photo.revision else {
             throw WorkflowError.message("Image changed after review. Rescan it.")
         }
         let metadata = try photo.metadata.validated()
+        if requireZonedDate { try requireImmichDate(metadata) }
+        return metadata
+    }
+
+    private func requireImmichDate(_ metadata: PhotoMetadata) throws {
         if !metadata.capturedAt.isEmpty && PhotoMetadata.zonedDate(metadata.capturedAt) == nil {
             throw WorkflowError.message("Immich needs an exact capture time with a timezone. Add the offset or leave the date empty for this action.")
         }
-        return metadata
     }
 
     private func request(_ method: String, path: String) -> URLRequest {
@@ -342,13 +387,31 @@ public final class ImmichClient: Sendable {
         return request
     }
 
-    private func send<T: Decodable>(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> T {
+    func send<T: Decodable>(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> T {
         var request = request(method, path: path)
         if let body {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         return try decode(try await load(request), request: request)
+    }
+
+    func previewImage(_ id: UUID) async throws -> Data {
+        var request = request("GET", path: "assets/\(id.uuidString)/thumbnail")
+        guard let url = request.url?.appending(queryItems: [
+            URLQueryItem(name: "size", value: "preview"),
+        ]) else { throw WorkflowError.message("Invalid Immich preview URL.") }
+        request.url = url
+        request.setValue("image/jpeg, image/webp, image/png", forHTTPHeaderField: "Accept")
+        let (data, response) = try await load(request)
+        guard let status = (response as? HTTPURLResponse)?.statusCode, status == 200 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw WorkflowError.message("Immich preview returned HTTP \(status).")
+        }
+        guard !data.isEmpty, data.count <= 32 * 1024 * 1024 else {
+            throw WorkflowError.message("Immich preview was empty or larger than 32 MiB.")
+        }
+        return data
     }
 
     private func decode<T: Decodable>(_ result: (Data, URLResponse), request: URLRequest) throws -> T {
@@ -456,7 +519,7 @@ public final class ImmichClient: Sendable {
         return planned
     }
 
-    fileprivate struct PlannedTag: Sendable {
+    struct PlannedTag: Sendable {
         let path: String
         let id: UUID?
 
@@ -530,16 +593,54 @@ public final class ImmichClient: Sendable {
         #endif
     }
 
-    fileprivate struct Asset: Decodable, Sendable {
+    struct Asset: Decodable, Sendable {
         let id: UUID
         let checksum: String
         let type: String
         let isTrashed: Bool
         let tags: [Tag]?
         let exifInfo: Exif?
+        let originalFileName: String?
+        let updatedAt: String?
+        let fileCreatedAt: String?
+        let fileModifiedAt: String?
+        let thumbhash: String?
+        let isEdited: Bool?
+
+        var metadata: PhotoMetadata {
+            var value = PhotoMetadata(
+                description: exifInfo?.description ?? "",
+                capturedAt: Self.captureDate(exifInfo?.dateTimeOriginal, fallback: fileCreatedAt),
+                rating: exifInfo?.rating.flatMap { (1...5).contains($0) ? $0 : nil }
+            )
+            if let lat = exifInfo?.latitude, let lon = exifInfo?.longitude,
+               (-90...90).contains(lat), (-180...180).contains(lon) {
+                value.latitude = lat
+                value.longitude = lon
+            }
+            for tag in (tags ?? []).sorted(by: { $0.value < $1.value }) {
+                let path = PlannedTag(path: tag.value, id: tag.id)
+                if let group = path.group, group != .subjects {
+                    value[keyPath: group.field].append(path.leaf)
+                } else { value.subjects.append(tag.value) }
+            }
+            return value
+        }
+
+        private static func captureDate(_ date: String?, fallback: String?) -> String {
+            for candidate in [date, fallback].compactMap({ $0 }) {
+                if (try? PhotoMetadata(capturedAt: candidate).validated()) != nil, !candidate.isEmpty {
+                    return candidate
+                }
+                if let parsed = PhotoMetadata.zonedDate(candidate) {
+                    return ISO8601DateFormatter().string(from: parsed)
+                }
+            }
+            return ""
+        }
     }
 
-    fileprivate struct Exif: Decodable, Sendable {
+    struct Exif: Decodable, Sendable {
         let description: String?
         let dateTimeOriginal: String?
         let latitude: Double?
@@ -547,7 +648,7 @@ public final class ImmichClient: Sendable {
         let rating: Int?
     }
     private struct Album: Decodable { let id: UUID }
-    fileprivate struct Tag: Decodable, Sendable { let id: UUID; let value: String }
+    struct Tag: Decodable, Sendable { let id: UUID; let value: String }
     private struct TagResult: Decodable { let count: Int }
     private struct BulkResult: Decodable { let id: UUID; let success: Bool; let error: String? }
     private struct UploadReceipt: Decodable { let id: UUID; let status: String }

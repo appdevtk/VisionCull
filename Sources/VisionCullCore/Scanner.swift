@@ -15,12 +15,18 @@ public struct PhotoInput: Sendable {
     public let file: URL
     public let relativePath: String
     public let libraryMetadata: PhotoMetadata?
+    let immichSource: ImmichPhotoSource?
 
     public init(id: String, file: URL, relativePath: String, libraryMetadata: PhotoMetadata? = nil) {
+        self.init(id: id, file: file, relativePath: relativePath, libraryMetadata: libraryMetadata, immichSource: nil)
+    }
+
+    init(id: String, file: URL, relativePath: String, libraryMetadata: PhotoMetadata?, immichSource: ImmichPhotoSource?) {
         self.id = id
         self.file = file
         self.relativePath = relativePath
         self.libraryMetadata = libraryMetadata
+        self.immichSource = immichSource
     }
 }
 
@@ -126,7 +132,9 @@ public struct PhotoScanner: Sendable {
                 }
                 entries.append(PhotoEntry(
                     id: input.id, file: input.file, relativePath: input.relativePath, revision: revision,
-                    existing: existing, analysis: analysis, fromApplePhotos: input.libraryMetadata != nil
+                    existing: existing, analysis: analysis,
+                    fromApplePhotos: input.libraryMetadata != nil && input.immichSource == nil,
+                    immichSource: input.immichSource
                 ))
             } catch is CancellationError {
                 throw CancellationError()

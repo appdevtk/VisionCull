@@ -5,6 +5,7 @@ import ImageIO
 
 enum EmbeddedMetadata {
     static func read(_ input: PhotoInput) throws -> PhotoMetadata {
+        if input.immichSource != nil { return input.libraryMetadata ?? PhotoMetadata() }
         var metadata = PhotoMetadata()
         #if os(macOS)
         if let source = CGImageSourceCreateWithURL(input.file as CFURL, nil),

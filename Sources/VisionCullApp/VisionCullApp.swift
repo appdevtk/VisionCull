@@ -62,6 +62,7 @@ private struct MetadataDraft: Equatable {
 @MainActor
 private final class Workspace: ObservableObject {
     @Published var review: Review?
+    @Published private(set) var immichConnection: ImmichConnection?
     @Published var selection: String?
     @Published var marked = Set<String>()
     @Published var drafts: [String: MetadataDraft] = [:]
@@ -91,6 +92,10 @@ private final class Workspace: ObservableObject {
         load("Reading Apple Photos…", source: "Apple Photos") {
             try await ApplePhotos.scan(scanner: scanner, limit: limit, offset: offset, allowICloud: download)
         }
+    }
+
+    func openImmich(_ review: Review, album: ImmichAlbum, connection: ImmichConnection) {
+        load("Opening Immich review…", source: album.albumName, connection: connection) { review }
     }
 
     func openReview() {
@@ -124,7 +129,7 @@ private final class Workspace: ObservableObject {
             review.photos[index].approved = false
         }
         self.review = review
-        status = "Saved edits for \(review.photos[index].file.lastPathComponent)."
+        status = "Saved edits for \(review.photos[index].displayName)."
         drafts.removeValue(forKey: id)
     }
 
@@ -201,7 +206,7 @@ private final class Workspace: ObservableObject {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
-    private func checkForDrafts() -> Bool {
+    func checkForDrafts() -> Bool {
         guard drafts.isEmpty else {
             alert = "Save or discard unsaved metadata edits first. A pencil marks photos with unsaved edits."
             return false
@@ -209,7 +214,7 @@ private final class Workspace: ObservableObject {
         return true
     }
 
-    private func load(_ label: String, source: String, operation: @escaping @Sendable () async throws -> Review) {
+    private func load(_ label: String, source: String, connection: ImmichConnection? = nil, operation: @escaping @Sendable () async throws -> Review) {
         guard checkForDrafts() else { return }
         activity = label
         Task {
@@ -224,6 +229,7 @@ private final class Workspace: ObservableObject {
                     return (review, links)
                 }.value
                 review = result
+                immichConnection = connection
                 self.matches = matches
                 sourceName = source
                 marked.removeAll()
@@ -235,7 +241,7 @@ private final class Workspace: ObservableObject {
 }
 
 private enum ReviewPanel: String, Identifiable {
-    case searches, tags, editing, content, immich
+    case searches, tags, editing, content, immich, immichSource
     var id: String { rawValue }
 }
 
@@ -283,7 +289,7 @@ private struct WorkspaceView: View {
                 }
                 List(visible, selection: $workspace.selection) { entry in
                     HStack(spacing: 10) {
-                        Toggle("Mark \(entry.file.lastPathComponent) for approval", isOn: Binding(
+                        Toggle("Mark \(entry.displayName) for approval", isOn: Binding(
                             get: { workspace.marked.contains(entry.id) },
                             set: { workspace.mark(entry.id, enabled: $0) }
                         ))
@@ -293,7 +299,7 @@ private struct WorkspaceView: View {
                             .frame(width: 52, height: 42)
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(entry.file.lastPathComponent).lineLimit(1)
+                            Text(entry.displayName).lineLimit(1)
                             Text(entry.metadata.category.isEmpty ? entry.relativePath : entry.metadata.category)
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
@@ -322,13 +328,13 @@ private struct WorkspaceView: View {
         } detail: {
             VStack(spacing: 0) {
                 if let entry = photos.first(where: { $0.id == workspace.selection }) {
-                    PhotoInspector(entry: entry, workspace: workspace)
+                    PhotoInspector(entry: entry, workspace: workspace, aliases: preferences.aliases)
                         .id(entry.id)
                 } else {
                     ContentUnavailableView {
                         Label("Choose photos to review", systemImage: "photo.on.rectangle.angled")
                     } description: {
-                        Text("Open a folder, read Apple Photos, or load a saved review.")
+                        Text("Open a folder, a photo library, an Immich album, or a saved review.")
                     } actions: {
                         Button("Open Folder…", action: workspace.openFolder).buttonStyle(.borderedProminent)
                     }
@@ -385,7 +391,7 @@ private struct WorkspaceView: View {
                     Button("XMP to Folder…") { workspace.export(alongside: false) }
                         .disabled(!photos.contains(where: \.approved))
                     Button("XMP Next to Originals…") { confirmAlongside = true }
-                        .disabled(!photos.contains(where: \.approved) || photos.contains { $0.approved && $0.fromApplePhotos })
+                        .disabled(!photos.contains(where: \.approved) || photos.contains { $0.approved && ($0.fromApplePhotos || $0.immichSource != nil) })
                 }
             }
         }
@@ -403,7 +409,10 @@ private struct WorkspaceView: View {
                     try workspace.applyBatchEdit(edit, aliases: preferences.aliases)
                 }
             case .content: ContentSearchPanel(photos: photos) { workspace.marked.formUnion($0) }
-            case .immich: ImmichBatchPanel(photos: photos.filter { workspace.marked.contains($0.id) }, aliases: preferences.aliases)
+            case .immich:
+                ImmichBatchPanel(photos: photos.filter { workspace.marked.contains($0.id) }, aliases: preferences.aliases, connection: workspace.immichConnection)
+            case .immichSource:
+                ImmichSourcePanel(aliases: preferences.aliases, findSimilar: workspace.duplicates, connection: workspace.immichConnection, open: workspace.openImmich)
             }
         }
         .sheet(isPresented: $photosOptions) { photosSheet }
@@ -461,6 +470,7 @@ private struct WorkspaceView: View {
 private struct PhotoInspector: View {
     let entry: PhotoEntry
     @ObservedObject var workspace: Workspace
+    let aliases: [TagAlias]
     @State private var showImmich = false
     @State private var showComparison = false
     private var comparePhotos: [PhotoEntry] {
@@ -482,8 +492,13 @@ private struct PhotoInspector: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(entry.file.lastPathComponent).font(.title2.bold()).textSelection(.enabled)
+                    Text(entry.displayName).font(.title2.bold()).textSelection(.enabled)
                     Text(entry.relativePath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    if entry.immichSource != nil {
+                        Label("Immich preview", systemImage: "photo")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .help("Aesthetics and comparison are estimated from the preview.")
+                    }
                 }
                 Thumbnail(url: entry.file, pixels: 1400)
                     .frame(maxWidth: .infinity).frame(height: 330)
@@ -499,7 +514,7 @@ private struct PhotoInspector: View {
                                 Button { workspace.selection = match.id } label: {
                                     VStack {
                                         Thumbnail(url: match.file, pixels: 270).frame(width: 112, height: 76)
-                                        Text(match.file.lastPathComponent).font(.caption).lineLimit(1)
+                                        Text(match.displayName).font(.caption).lineLimit(1)
                                     }.frame(width: 112)
                                 }
                                 .buttonStyle(.plain)
@@ -532,7 +547,13 @@ private struct PhotoInspector: View {
             .frame(maxWidth: 840).padding(24)
             .frame(maxWidth: .infinity)
         }
-        .sheet(isPresented: $showImmich) { ImmichSheet(photo: entry) }
+        .sheet(isPresented: $showImmich) {
+            if entry.immichSource != nil {
+                ImmichBatchPanel(photos: [entry], aliases: aliases, connection: workspace.immichConnection)
+            } else {
+                ImmichSheet(photo: entry)
+            }
+        }
         .sheet(isPresented: $showComparison) {
             let group = workspace.matches[entry.id]
             SeriesComparison(
@@ -725,7 +746,7 @@ private struct ImmichSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Send to Immich").font(.title2)
-            Text(photo.file.lastPathComponent).font(.headline)
+            Text(photo.displayName).font(.headline)
             Picker("Action", selection: $action) {
                 ForEach(Action.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
@@ -757,7 +778,7 @@ private struct ImmichSheet: View {
         ) {
             Button(action == .upload ? "Upload Image" : "Update Asset", action: run)
         } message: {
-            Text(action == .upload ? "This sends \(photo.file.lastPathComponent) to album \(album)." : "Asset ID: \(asset)")
+            Text(action == .upload ? "This sends \(photo.displayName) to album \(album)." : "Asset ID: \(asset)")
         }
     }
 

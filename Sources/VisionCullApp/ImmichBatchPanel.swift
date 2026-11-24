@@ -20,15 +20,26 @@ struct ImmichBatchPanel: View {
     @State private var confirm = false
     @State private var issue = ""
 
+    init(photos: [PhotoEntry], aliases: [TagAlias], connection: ImmichConnection? = nil) {
+        self.photos = photos
+        self.aliases = aliases
+        _server = State(initialValue: connection?.server ?? photos.first?.immichSource?.endpoint.absoluteString ?? "")
+        _key = State(initialValue: connection?.apiKey ?? "")
+    }
+
+    private var hasLocalPhotos: Bool { photos.contains { $0.immichSource == nil } }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Immich Batch Preview").font(.title2.bold())
             HStack {
                 TextField("Immich HTTPS URL", text: $server)
                 SecureField("API key", text: $key)
-                TextField("Album UUID for uploads", text: $album)
+                if hasLocalPhotos { TextField("Album UUID for uploads", text: $album) }
             }.disabled(busy)
-            Text("Existing items match by file checksum. Choose uploads individually and supply an album.")
+            Text(hasLocalPhotos
+                 ? "Local items match by file checksum. Choose uploads individually and supply an album."
+                 : "Preview items update the checked Immich asset. Sending applies metadata and attaches tags.")
                 .foregroundStyle(.secondary)
             List(photos) { photo in
                 row(photo)
@@ -66,17 +77,21 @@ struct ImmichBatchPanel: View {
                 )).labelsHidden().toggleStyle(.checkbox).disabled(!canSelect)
                 Text(photo.relativePath).fontWeight(.medium)
                 Spacer()
-                Toggle("Upload new", isOn: Binding(
-                    get: { upload.contains(photo.id) },
-                    set: {
-                        if $0 { upload.insert(photo.id) } else { upload.remove(photo.id) }
-                        invalidate()
-                    }
-                )).toggleStyle(.checkbox)
-                TextField("Existing asset UUID (optional)", text: Binding(
-                    get: { overrides[photo.id] ?? "" },
-                    set: { overrides[photo.id] = $0; invalidate() }
-                )).frame(width: 250).disabled(upload.contains(photo.id))
+                if let source = photo.immichSource {
+                    Text(source.assetID.uuidString).font(.caption.monospaced()).textSelection(.enabled)
+                } else {
+                    Toggle("Upload new", isOn: Binding(
+                        get: { upload.contains(photo.id) },
+                        set: {
+                            if $0 { upload.insert(photo.id) } else { upload.remove(photo.id) }
+                            invalidate()
+                        }
+                    )).toggleStyle(.checkbox)
+                    TextField("Existing asset UUID (optional)", text: Binding(
+                        get: { overrides[photo.id] ?? "" },
+                        set: { overrides[photo.id] = $0; invalidate() }
+                    )).frame(width: 250).disabled(upload.contains(photo.id))
+                }
             }
             if let receipt {
                 if let problem = receipt.problem { Text(problem).foregroundStyle(.red).textSelection(.enabled) }

@@ -19,6 +19,8 @@ struct Command {
                      [--date ISO-8601] [--latitude DECIMAL --longitude DECIMAL | --clear-gps]
       visioncull approve REVIEW.json [--cache DIR] (--all | PHOTO...)
       visioncull export REVIEW.json (--alongside | --output DIR)
+      visioncull immich albums --server URL [--cache DIR]
+      visioncull immich scan --server URL --album UUID --review REVIEW.json [--cache DIR] [--duplicates] [--metadata-only]
       visioncull immich update REVIEW.json PHOTO --server URL --asset-id UUID [--album UUID]
       visioncull immich upload REVIEW.json PHOTO --server URL --album UUID
       visioncull immich batch REVIEW.json (--all | --preset NAME | PHOTO...) --server URL [--map FILE.json] [--apply]
@@ -140,8 +142,11 @@ struct Command {
             let result = try XMP.export(Review.read(file(options.positionals[0])), to: target)
             for url in result { print(url.path) }
         case "immich":
-            if args.first == "batch" { try await immichBatch(Array(args.dropFirst())) }
-            else { try await immich(args) }
+            switch args.first {
+            case "batch": try await immichBatch(Array(args.dropFirst()))
+            case "albums", "scan": try await immichSource(args)
+            default: try await immich(args)
+            }
         case "search": try searchCommands(args)
         case "batch-edit": try batchEdit(args)
         case "tags": try await tagCommands(args)
@@ -242,7 +247,7 @@ struct Command {
     }
 }
 
-private struct MetadataOnly: PhotoAnalyzer {
+struct MetadataOnly: PhotoAnalyzer {
     let cacheVersion = "metadata-only-1"
     func analyze(_ file: URL) throws -> ImageAnalysis { ImageAnalysis() }
 }
