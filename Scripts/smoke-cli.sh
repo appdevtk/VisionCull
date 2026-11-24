@@ -9,7 +9,7 @@ mkdir -p "$stage/images/album"
 cp Tests/VisionCullCoreTests/Fixtures/sample.png "$stage/images/album/one.png"
 cp Tests/VisionCullCoreTests/Fixtures/sample.png "$stage/images/two.png"
 mode=()
-if [[ "$(uname -s)" != "Darwin" ]]; then mode=(--metadata-only); fi
+if [[ "$(uname -s)" != "Darwin" || "${VISIONCULL_CI_METADATA_ONLY:-0}" == 1 ]]; then mode=(--metadata-only); fi
 
 check_output() {
     local expected="$1" output
@@ -32,6 +32,11 @@ check_output '[pending] album/one.png' "$cli" preview "$stage/first.json"
     --topics 'Smoke test garden' --moods 'Ruhig, Calm' --styles 'Smoke test soft' --rating 4
 check_output '[pending] album/one.png' "$cli" preview "$stage/first.json" --search 'garden ruhig'
 check_output 'No photos matched.' "$cli" preview "$stage/first.json" --search 'garden improbable-motif'
+"$cli" tags alias Moods Stillness Calm --cache "$stage/cache"
+"$cli" search save "Garden" --topics "Smoke test garden" --moods Stillness --stars 4 --cache "$stage/cache"
+check_output 'album/one.png' "$cli" search run "Garden" "$stage/first.json" --cache "$stage/cache"
+"$cli" batch-edit "$stage/first.json" --preset "Garden" --styles "Warm tones" --cache "$stage/cache"
+check_output '★ album/one.png' "$cli" series "$stage/first.json" album/one.png two.png --favorite album/one.png
 "$cli" approve "$stage/first.json" --cache "$stage/cache" album/one.png
 "$cli" export "$stage/first.json" --output "$stage/export"
 grep -F 'Red &amp; yellow' "$stage/export/album/one.xmp"
@@ -43,3 +48,4 @@ grep -F '<xmp:Rating>4</xmp:Rating>' "$stage/export/album/one.xmp"
 test ! -e "$stage/export/two.xmp"
 cmp Tests/VisionCullCoreTests/Fixtures/sample.png "$stage/images/album/one.png"
 test ! -e "$stage/images/album/one.xmp"
+grep -F 'VisionCull/Styles/Warm tones' "$stage/export/album/one.xmp"

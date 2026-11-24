@@ -6,20 +6,58 @@ import FoundationNetworking
 import CryptoKit
 #endif
 
+public enum ImmichBatchIntent: Equatable, Sendable {
+    case matchExisting
+    case update(UUID)
+    case upload(album: UUID)
+}
+
+public struct ImmichBatchRequest: Sendable, Identifiable {
+    public let photo: PhotoEntry
+    public var intent: ImmichBatchIntent
+    public var id: String { photo.id }
+
+    public init(photo: PhotoEntry, intent: ImmichBatchIntent = .matchExisting) {
+        self.photo = photo
+        self.intent = intent
+    }
+}
+
+public struct ImmichBatchPreview: Identifiable, Sendable {
+    public let id: String
+    public let path: String
+    public let assetID: UUID?
+    public let albumID: UUID?
+    public let reusedTags: [String]
+    public let newTags: [String]
+    public let metadataChanges: [String]
+    public let problem: String?
+    public var isReady: Bool { problem == nil && plan != nil }
+    fileprivate let plan: ImmichClient.Prepared?
+}
+
+public struct ImmichBatchResult: Identifiable, Sendable {
+    public let id: String
+    public let path: String
+    public let assetID: UUID?
+    public let problem: String?
+}
+
 public final class ImmichClient: Sendable {
     private let endpoint: URL
     private let key: String
     private let load: @Sendable (URLRequest) async throws -> (Data, URLResponse)
     private let sendFile: @Sendable (URLRequest, URL) async throws -> (Data, URLResponse)
+    private let tagRules: TagRules
     private let fingerprint: @Sendable (URL) throws -> String
 
-    public convenience init(server: URL, apiKey: String) throws {
+    public convenience init(server: URL, apiKey: String, aliases: [TagAlias] = []) throws {
         let session = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
         try self.init(
             server: server, apiKey: apiKey,
             load: { try await session.data(for: $0) },
             sendFile: { try await session.upload(for: $0, fromFile: $1) },
-            fingerprint: { try Self.checksum($0) }
+            fingerprint: { try Self.checksum($0) }, aliases: aliases
         )
     }
 
@@ -27,7 +65,7 @@ public final class ImmichClient: Sendable {
         server: URL, apiKey: String,
         load: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse),
         sendFile: @escaping @Sendable (URLRequest, URL) async throws -> (Data, URLResponse),
-        fingerprint: @escaping @Sendable (URL) throws -> String
+        fingerprint: @escaping @Sendable (URL) throws -> String, aliases: [TagAlias] = []
     ) throws {
         let host = server.host ?? ""
         let loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host.lowercased())
@@ -43,69 +81,245 @@ public final class ImmichClient: Sendable {
         self.load = load
         self.sendFile = sendFile
         self.fingerprint = fingerprint
+        self.tagRules = TagRules(custom: aliases)
     }
 
     public func update(_ photo: PhotoEntry, assetID: UUID, addToAlbum album: UUID? = nil) async throws {
+        let prepared = try await prepare(ImmichBatchRequest(photo: photo, intent: .update(assetID)), updateAlbum: album)
+        _ = try await execute(prepared)
+    }
+
+    @discardableResult
+    public func upload(_ photo: PhotoEntry, album: UUID) async throws -> UUID {
+        let prepared = try await prepare(ImmichBatchRequest(photo: photo, intent: .upload(album: album)))
+        return try await execute(prepared)
+    }
+
+    /// Performs checksum lookups and other read-only preflight checks. The upload-check POST does not modify Immich.
+    public func previewBatch(_ requests: [ImmichBatchRequest]) async throws -> [ImmichBatchPreview] {
+        var records = [(ImmichBatchRequest, Result<Prepared, Error>)]()
+        for request in requests {
+            try Task.checkCancellation()
+            do { records.append((request, .success(try await prepare(request)))) }
+            catch is CancellationError { throw CancellationError() }
+            catch { records.append((request, .failure(error))) }
+        }
+        let plans = records.compactMap { try? $0.1.get() }
+        let destinations = Dictionary(grouping: plans, by: \.destination)
+        return records.map { request, result in
+            switch result {
+            case .failure(let error):
+                return preview(request, plan: nil, problem: error.localizedDescription)
+            case .success(let plan):
+                let conflict = (destinations[plan.destination]?.count ?? 0) > 1
+                return preview(request, plan: plan, problem: conflict ? "More than one selected photo targets the same asset or upload checksum." : nil)
+            }
+        }
+    }
+
+    /// Revalidates each checked item immediately before sending. Reports each result independently.
+    public func applyBatch(_ rows: [ImmichBatchPreview]) async throws -> [ImmichBatchResult] {
+        var results = [ImmichBatchResult]()
+        var sent = Set<String>()
+        for row in rows {
+            try Task.checkCancellation()
+            do {
+                guard row.isReady, let old = row.plan, old.endpoint == endpoint,
+                      sent.insert(old.destination).inserted else {
+                    throw WorkflowError.message("Select a unique, ready preview row for this server.")
+                }
+                let current = try await prepare(old.request)
+                guard old.accepts(current) else {
+                    throw WorkflowError.message("The target, file, or tag mapping changed. Preview again before sending.")
+                }
+                let id = try await execute(current)
+                results.append(ImmichBatchResult(id: row.id, path: row.path, assetID: id, problem: nil))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                results.append(ImmichBatchResult(id: row.id, path: row.path, assetID: row.assetID, problem: error.localizedDescription))
+            }
+        }
+        return results
+    }
+
+    public func similarTags() async throws -> [TagSimilarity] {
+        let tags: [Tag] = try await send("GET", "tags")
+        var grouped = [TagGroup: [String]]()
+        for tag in tags {
+            let planned = PlannedTag(path: tag.value, id: tag.id)
+            if let group = planned.group { grouped[group, default: []].append(tag.value) }
+        }
+        return TagInventory.similar(in: grouped, rules: tagRules)
+    }
+
+    private func preview(_ request: ImmichBatchRequest, plan: Prepared?, problem: String?) -> ImmichBatchPreview {
+        let changes: [String] = plan.map { prepared in
+            prepared.outboundFields.keys.sorted().map { key in
+                let value = prepared.outboundFields[key] ?? ""
+                if let before = prepared.remoteFields[key], before != value {
+                    return "\(key): \(before) → \(value)"
+                }
+                return "\(key): \(value)"
+            }
+        } ?? []
+        return ImmichBatchPreview(
+            id: request.id, path: request.photo.relativePath, assetID: plan?.asset?.id, albumID: plan?.album,
+            reusedTags: plan?.tags.filter { $0.id != nil }.map(\.path) ?? [],
+            newTags: plan?.tags.filter { $0.id == nil }.map(\.path) ?? [],
+            metadataChanges: changes, problem: problem, plan: plan
+        )
+    }
+
+    private func prepare(_ request: ImmichBatchRequest, updateAlbum: UUID? = nil) async throws -> Prepared {
+        let photo = request.photo
         let metadata = try check(photo)
         let checksum = try fingerprint(photo.file)
         guard try FileRevision.read(photo.file) == photo.revision else {
             throw WorkflowError.message("Image changed during checksum verification. Rescan it.")
         }
-        let asset: Asset = try await send("GET", "assets/\(assetID.uuidString)")
-        guard asset.id == assetID, asset.checksum == checksum, asset.type == "IMAGE", !asset.isTrashed else {
-            throw WorkflowError.message("Asset \(assetID) does not match the reviewed image checksum, or is unavailable. Confirm the exact asset in Immich.")
+
+        let target: UUID?
+        let album: UUID?
+        switch request.intent {
+        case .update(let id):
+            target = id
+            album = updateAlbum
+        case .matchExisting:
+            target = try await findExisting(checksum)
+            album = nil
+        case .upload(let id):
+            try await verifyAlbum(id)
+            let result = try await uploadCheck(checksum)
+            guard result.action == "accept", result.assetId == nil else {
+                let details = result.assetId.map { " Existing asset ID: \($0.uuidString)." } ?? ""
+                throw WorkflowError.message("Immich declined the new upload.\(details) Verify the match before choosing Update.")
+            }
+            target = nil
+            album = id
         }
-        if let album { try await verifyAlbum(album) }
-        let tags = try await planTags(for: metadata, current: asset.tags ?? [])
-        do {
-            try await apply(metadata, to: assetID, current: asset, tags: tags)
-            if let album { try await add(assetID, to: album) }
-        } catch {
-            throw WorkflowError.message("Immich asset \(assetID): \(error.localizedDescription). Some earlier steps may have succeeded.")
-        }
+
+        let asset: Asset?
+        if let target {
+            asset = try await checkedAsset(target, checksum: checksum)
+            if let album { try await verifyAlbum(album) }
+        } else { asset = nil }
+        let tags = try await planTags(for: metadata, current: asset?.tags ?? [])
+        return Prepared(request: request, endpoint: endpoint, metadata: metadata, checksum: checksum, asset: asset, album: album, tags: tags)
     }
 
-    @discardableResult
-    public func upload(_ photo: PhotoEntry, album: UUID) async throws -> UUID {
-        let metadata = try check(photo)
-        let checksum = try fingerprint(photo.file)
-        try await verifyAlbum(album)
+    private func findExisting(_ checksum: String) async throws -> UUID {
+        let result: ChecksumSearch = try await send(
+            "POST", "search/metadata", body: ["checksum": checksum, "type": "IMAGE", "size": 2, "withStacked": true]
+        )
+        if result.assets.items.isEmpty {
+            throw WorkflowError.message("No existing asset matched. Enter a verified asset ID or choose a new upload and album.")
+        }
+        guard result.assets.items.count == 1, let item = result.assets.items.first,
+              result.assets.nextPage == nil, result.assets.nextCursor == nil,
+              item.checksum == checksum, item.type == "IMAGE", !item.isTrashed else {
+            let ids = result.assets.items.map { $0.id.uuidString }.joined(separator: ", ")
+            throw WorkflowError.message("The checksum did not resolve to one available image. Enter the verified asset ID. Candidates: \(ids)")
+        }
+        return item.id
+    }
+
+    private func uploadCheck(_ checksum: String) async throws -> UploadCheck.Result {
         let localID = UUID()
-        let check: UploadCheck = try await send(
+        let reply: UploadCheck = try await send(
             "POST", "assets/bulk-upload-check", body: ["assets": [["id": localID.uuidString, "checksum": checksum]]]
         )
-        guard check.results.count == 1, let result = check.results.first, result.id == localID else {
-            throw WorkflowError.message("Immich could not verify whether this image is new.")
+        guard reply.results.count == 1, let result = reply.results.first, result.id == localID else {
+            throw WorkflowError.message("Immich could not verify the image checksum lookup.")
         }
-        guard result.action == "accept" else {
-            let details = result.assetId.map { " Existing asset ID: \($0.uuidString)." } ?? ""
-            throw WorkflowError.message("Immich declined the new upload.\(details) Verify the match before choosing Update.")
-        }
+        return result
+    }
 
-        let tags = try await planTags(for: metadata, current: [])
+    private func checkedAsset(_ id: UUID, checksum: String) async throws -> Asset {
+        let asset: Asset = try await send("GET", "assets/\(id.uuidString)")
+        guard asset.id == id, asset.checksum == checksum, asset.type == "IMAGE", !asset.isTrashed else {
+            throw WorkflowError.message("Asset \(id) does not match the reviewed image checksum, or is unavailable. Confirm the exact asset in Immich.")
+        }
+        return asset
+    }
+
+    private func execute(_ plan: Prepared) async throws -> UUID {
+        if let asset = plan.asset {
+            guard try FileRevision.read(plan.request.photo.file) == plan.request.photo.revision else {
+                throw WorkflowError.message("Image changed after preview. Rescan it.")
+            }
+            do {
+                try await apply(plan.metadata, to: asset.id, current: asset, tags: plan.tags)
+                if let album = plan.album { try await add(asset.id, to: album) }
+                return asset.id
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw WorkflowError.message("Immich asset \(asset.id): \(error.localizedDescription). Some earlier steps may have succeeded.")
+            }
+        }
+        guard let album = plan.album else { throw WorkflowError.message("Choose a target album before uploading.") }
         let boundary = "VisionCull-\(UUID().uuidString)"
-        let multipart = try makeMultipart(photo, metadata: metadata, boundary: boundary)
+        let multipart = try makeMultipart(plan.request.photo, metadata: plan.metadata, boundary: boundary)
         defer { try? FileManager.default.removeItem(at: multipart) }
 
         var request = request("POST", path: "assets")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.setValue(checksum, forHTTPHeaderField: "x-immich-checksum")
+        request.setValue(plan.checksum, forHTTPHeaderField: "x-immich-checksum")
         let response = try await sendFile(request, multipart)
         let receipt: UploadReceipt = try decode(response, request: request)
         guard receipt.status == "created" else {
             throw WorkflowError.message("Immich returned \(receipt.status) for asset \(receipt.id). Verify that asset before choosing Update.")
         }
         do {
-            let asset: Asset = try await send("GET", "assets/\(receipt.id.uuidString)")
-            guard asset.id == receipt.id, asset.checksum == checksum, asset.type == "IMAGE", !asset.isTrashed else {
-                throw WorkflowError.message("Immich returned a different checksum or an unavailable asset.")
-            }
+            let asset = try await checkedAsset(receipt.id, checksum: plan.checksum)
             try await add(receipt.id, to: album)
-            try await apply(metadata, to: receipt.id, current: asset, tags: tags)
+            try await apply(plan.metadata, to: receipt.id, current: asset, tags: plan.tags)
         } catch {
             throw WorkflowError.message("Uploaded asset \(receipt.id), but follow-up failed: \(error.localizedDescription). Use Update with this ID to finish.")
         }
         return receipt.id
+    }
+
+    fileprivate struct Prepared: Sendable {
+        let request: ImmichBatchRequest
+        let endpoint: URL
+        let metadata: PhotoMetadata
+        let checksum: String
+        fileprivate let asset: Asset?
+        let album: UUID?
+        fileprivate let tags: [PlannedTag]
+
+        var destination: String { asset.map { "asset:\($0.id)" } ?? "upload:\(checksum)" }
+
+        var outboundFields: [String: String] {
+            var fields = [String: String]()
+            if !metadata.description.isEmpty { fields["Description"] = metadata.description }
+            if !metadata.capturedAt.isEmpty { fields["Capture date"] = metadata.capturedAt }
+            if let rating = metadata.rating { fields["Stars"] = String(rating) }
+            if let lat = metadata.latitude, let lon = metadata.longitude { fields["GPS"] = "\(lat), \(lon)" }
+            return fields
+        }
+
+        var remoteFields: [String: String] {
+            guard let details = asset?.exifInfo else { return [:] }
+            var fields = [String: String]()
+            fields["Description"] = details.description
+            fields["Capture date"] = details.dateTimeOriginal
+            fields["Stars"] = details.rating.map { String($0) }
+            if let lat = details.latitude, let lon = details.longitude { fields["GPS"] = "\(lat), \(lon)" }
+            let targeted = outboundFields
+            return fields.filter { targeted[$0.key] != nil }
+        }
+
+        func accepts(_ current: Prepared) -> Bool {
+            guard destination == current.destination, checksum == current.checksum, album == current.album,
+                  metadata == current.metadata, remoteFields == current.remoteFields, tags.count == current.tags.count else { return false }
+            // A tag created by an earlier item may gain an ID. Its approved path must still match.
+            return zip(tags, current.tags).allSatisfy { old, new in
+                old.path == new.path && (old.id == nil || old.id == new.id)
+            }
+        }
     }
 
     private func check(_ photo: PhotoEntry) throws -> PhotoMetadata {
@@ -216,7 +430,7 @@ public final class ImmichClient: Sendable {
             let associated = group.flatMap { group in
                 matching.first { option in
                     guard let id = option.id, currentIDs.contains(id) else { return false }
-                    return TagRules.equivalent(candidate.leaf, option.leaf, in: group)
+                    return tagRules.equivalent(candidate.leaf, option.leaf, in: group)
                 }
             }
             let resolved: PlannedTag
@@ -224,7 +438,7 @@ public final class ImmichClient: Sendable {
                 resolved = preferred
             } else if let group {
                 let names = matching.map(\.leaf)
-                let match = try TagRules.resolve(
+                let match = try tagRules.resolve(
                     candidate.leaf, in: group, candidates: names
                 )
                 if match.existing, let known = matching.first(where: { $0.leaf == match.name }) {
@@ -242,7 +456,7 @@ public final class ImmichClient: Sendable {
         return planned
     }
 
-    private struct PlannedTag {
+    fileprivate struct PlannedTag: Sendable {
         let path: String
         let id: UUID?
 
@@ -316,12 +530,35 @@ public final class ImmichClient: Sendable {
         #endif
     }
 
-    private struct Asset: Decodable { let id: UUID; let checksum: String; let type: String; let isTrashed: Bool; let tags: [Tag]? }
+    fileprivate struct Asset: Decodable, Sendable {
+        let id: UUID
+        let checksum: String
+        let type: String
+        let isTrashed: Bool
+        let tags: [Tag]?
+        let exifInfo: Exif?
+    }
+
+    fileprivate struct Exif: Decodable, Sendable {
+        let description: String?
+        let dateTimeOriginal: String?
+        let latitude: Double?
+        let longitude: Double?
+        let rating: Int?
+    }
     private struct Album: Decodable { let id: UUID }
-    private struct Tag: Decodable { let id: UUID; let value: String }
+    fileprivate struct Tag: Decodable, Sendable { let id: UUID; let value: String }
     private struct TagResult: Decodable { let count: Int }
     private struct BulkResult: Decodable { let id: UUID; let success: Bool; let error: String? }
     private struct UploadReceipt: Decodable { let id: UUID; let status: String }
+    private struct ChecksumSearch: Decodable {
+        struct Results: Decodable {
+            let items: [Asset]
+            let nextPage: String?
+            let nextCursor: String?
+        }
+        let assets: Results
+    }
     private struct UploadCheck: Decodable {
         struct Result: Decodable { let id: UUID; let action: String; let assetId: UUID? }
         let results: [Result]

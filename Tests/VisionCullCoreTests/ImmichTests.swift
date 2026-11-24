@@ -188,6 +188,85 @@ final class ImmichTests: XCTestCase {
         }
     }
 
+    func testBatchPreviewDoesNotWriteAndRejectsAChangedAsset() async throws {
+        let id = UUID()
+        var photo = try makePhoto()
+        photo.metadata.description = "Confirmed caption"
+        let remoteChanged = AttachmentRecord()
+        let client = try client { request in
+            if request.url?.path == "/api/search/metadata" {
+                XCTAssertEqual(request.httpMethod, "POST")
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.requestBody(request)) as? [String: Any])
+                XCTAssertEqual(body["checksum"] as? String, "test-checksum")
+                return ["assets": ["items": [["id": id.uuidString, "checksum": "test-checksum", "type": "IMAGE", "isTrashed": false]]]]
+            }
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/assets/\(id)")
+            return [
+                "id": id.uuidString, "checksum": "test-checksum", "type": "IMAGE", "isTrashed": false,
+                "exifInfo": ["description": remoteChanged.value ? "Concurrent edit" : "Original caption"],
+            ]
+        }
+        let rows = try await client.previewBatch([ImmichBatchRequest(photo: photo)])
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertTrue(row.isReady)
+        XCTAssertEqual(row.assetID, id)
+        XCTAssertEqual(row.metadataChanges, ["Description: Original caption → Confirmed caption"])
+        remoteChanged.set()
+        let results = try await client.applyBatch(rows)
+        XCTAssertTrue(results.first?.problem?.contains("changed") == true)
+    }
+
+    func testBatchUpdatesOnlySelectedRowsAndRejectsDuplicateDestinations() async throws {
+        let id = UUID()
+        var first = try makePhoto()
+        first.metadata.rating = 4
+        let second = try makePhoto()
+        let wrote = AttachmentRecord()
+        let client = try client { request in
+            if request.url?.path == "/api/search/metadata" {
+                let items: [[String: Any]] = []
+                return ["assets": ["items": items]]
+            }
+            if request.httpMethod == "PUT" {
+                XCTAssertEqual(request.url?.path, "/api/assets/\(id)")
+                wrote.set()
+            } else { XCTAssertEqual(request.httpMethod, "GET") }
+            return ["id": id.uuidString, "checksum": "test-checksum", "type": "IMAGE", "isTrashed": false]
+        }
+        let conflicts = try await client.previewBatch([
+            ImmichBatchRequest(photo: first, intent: .update(id)),
+            ImmichBatchRequest(photo: second, intent: .update(id)),
+        ])
+        XCTAssertTrue(conflicts.allSatisfy { !$0.isReady })
+        let preview = try await client.previewBatch([
+            ImmichBatchRequest(photo: first, intent: .update(id)), ImmichBatchRequest(photo: second),
+        ])
+        XCTAssertEqual(preview.filter(\.isReady).map(\.id), [first.id])
+        XCTAssertFalse(wrote.value)
+        let result = try await client.applyBatch(preview.filter(\.isReady))
+        XCTAssertEqual(result.first?.assetID, id)
+        XCTAssertNil(result.first?.problem)
+        XCTAssertTrue(wrote.value)
+    }
+
+    func testBatchRequiresSelectionWhenChecksumHasMultipleMatches() async throws {
+        let first = UUID(), second = UUID()
+        let photo = try makePhoto()
+        let client = try client { request in
+            XCTAssertEqual(request.url?.path, "/api/search/metadata")
+            XCTAssertEqual(request.httpMethod, "POST")
+            let items: [[String: Any]] = [first, second].map { id in
+                ["id": id.uuidString, "checksum": "test-checksum", "type": "IMAGE", "isTrashed": false]
+            }
+            return ["assets": ["items": items]]
+        }
+        let row = try await client.previewBatch([ImmichBatchRequest(photo: photo)]).first
+        XCTAssertEqual(row?.isReady, false)
+        XCTAssertTrue(row?.problem?.contains(first.uuidString) == true)
+        XCTAssertTrue(row?.problem?.contains(second.uuidString) == true)
+    }
+
     private static func requestBody(_ request: URLRequest) throws -> Data {
         try XCTUnwrap(request.httpBody)
     }

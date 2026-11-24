@@ -154,7 +154,7 @@ public struct PhotoScanner: Sendable {
     }
 
     // The full ID is checked in the record. A hash collision can only cause a cache miss.
-    private static func cacheKey(_ id: String) -> String {
+    static func cacheKey(_ id: String) -> String {
         let hash = id.utf8.reduce(UInt64(0xcbf29ce484222325)) { ($0 ^ UInt64($1)) &* 0x100000001b3 }
         return String(hash, radix: 16)
     }

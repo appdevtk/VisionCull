@@ -5,7 +5,7 @@ import Darwin
 import Glibc
 #endif
 
-enum TagRules {
+struct TagRules {
     struct Match {
         let name: String
         let existing: Bool
@@ -63,10 +63,54 @@ enum TagRules {
         Dictionary(lists.flatMap { list in list.map { (key($0), list[0]) } }, uniquingKeysWith: { first, _ in first })
     }
 
-    static func searchNames(for name: String, in group: TagGroup) -> [String] {
-        guard let primary = families[group]?[key(name)],
-              let names = aliases[group]?.first(where: { $0.first == primary }) else { return [name] }
-        return [name] + names
+    private let custom: [TagAlias]
+    private let byGroup: [TagGroup: [String: String]]
+
+    init(custom: [TagAlias] = []) {
+        self.custom = custom
+        byGroup = Dictionary(grouping: custom, by: \.group).mapValues { rules in
+            Dictionary(rules.map { (Self.baseKey($0.alias, in: $0.group), $0.preferred) }, uniquingKeysWith: { _, last in last })
+        }
+    }
+
+    static func baseKey(_ name: String, in group: TagGroup) -> String {
+        let normalized = key(name)
+        return families[group]?[normalized].map(key) ?? normalized
+    }
+
+    static func validate(custom: [TagAlias]) throws {
+        let rules = TagRules(custom: custom)
+        for entry in custom {
+            if rules.customName(entry.alias, in: entry.group) == nil {
+                throw WorkflowError.message("The alias for \(entry.alias) creates a cycle.")
+            }
+        }
+    }
+
+    /// A nil result is a cycle. A preference within the same built-in family is a spelling choice.
+    private func customName(_ name: String, in group: TagGroup) -> String? {
+        let values = byGroup[group] ?? [:]
+        var current = name
+        var seen = Set<String>()
+        while let preferred = values[Self.baseKey(current, in: group)] {
+            let key = Self.baseKey(current, in: group)
+            if Self.baseKey(preferred, in: group) == key { return preferred }
+            guard seen.insert(key).inserted else { return nil }
+            current = preferred
+        }
+        return current
+    }
+
+    private func canonicalName(_ name: String, in group: TagGroup) -> String {
+        let preferred = customName(name, in: group) ?? name
+        if byGroup[group]?[Self.baseKey(name, in: group)] != nil { return preferred }
+        return Self.families[group]?[Self.key(name)] ?? name
+    }
+
+    func searchNames(for name: String, in group: TagGroup) -> [String] {
+        let candidates = (Self.aliases[group] ?? []).flatMap { $0 }
+            + custom.filter { $0.group == group }.flatMap { [$0.alias, $0.preferred] }
+        return [name] + candidates.filter { equivalent(name, $0, in: group) }
     }
 
     static func pathKey(_ value: String) -> String {
@@ -77,28 +121,39 @@ enum TagRules {
         }.joined(separator: "/")
     }
 
-    static func equivalent(_ first: String, _ second: String, in group: TagGroup) -> Bool {
-        let a = key(first)
-        let b = key(second)
-        if a == b { return !a.isEmpty || first == second }
-        if let canonical = families[group]?[a] { return canonical == families[group]?[b] }
-        return false
+    func identity(_ name: String, in group: TagGroup) -> String {
+        let key = Self.baseKey(canonicalName(name, in: group), in: group)
+        return key.isEmpty ? "literal:" + name : "normalized:" + key
     }
 
-    static func resolve(_ proposed: String, in group: TagGroup, candidates: [String]) throws -> Match {
+    func equivalent(_ first: String, _ second: String, in group: TagGroup) -> Bool {
+        identity(first, in: group) == identity(second, in: group)
+    }
+
+    func resolve(_ proposed: String, in group: TagGroup, candidates: [String], enforceUserPreference: Bool = false) throws -> Match {
         if proposed.contains("/") {
-            if let match = candidates.first(where: { pathKey(proposed) == pathKey($0) }) {
+            if let match = candidates.first(where: { Self.pathKey(proposed) == Self.pathKey($0) }) {
                 return Match(name: match, existing: true)
             }
             return Match(name: proposed, existing: false)
         }
-        if let match = candidates.first(where: { !$0.contains("/") && equivalent(proposed, $0, in: group) }) {
+        let normalized = canonicalName(proposed, in: group)
+        if enforceUserPreference, let preferred = custom.first(where: {
+            $0.group == group && self.equivalent(proposed, $0.preferred, in: group)
+        }).flatMap({ customName($0.preferred, in: group) }) {
+            return Match(name: preferred, existing: candidates.contains(preferred))
+        }
+        let equivalent = candidates.filter { !$0.contains("/") && self.equivalent(proposed, $0, in: group) }
+        let userPreference = Self.key(customName(proposed, in: group) ?? proposed)
+        let hasPreference = byGroup[group]?[Self.baseKey(proposed, in: group)] != nil
+        let preferred = hasPreference ? equivalent.first { Self.key($0) == userPreference } : nil
+        if let match = preferred ?? equivalent.first {
             return Match(name: match, existing: true)
         }
 
         var near = [String]()
-        for candidate in candidates where !candidate.contains("/") && isTypo(key(proposed), key(candidate)) {
-            if !near.contains(where: { equivalent(candidate, $0, in: group) }) { near.append(candidate) }
+        for candidate in candidates where !candidate.contains("/") && Self.isTypo(Self.key(proposed), Self.key(candidate)) {
+            if !near.contains(where: { self.equivalent(candidate, $0, in: group) }) { near.append(candidate) }
         }
         if near.count > 1 {
             throw WorkflowError.message(
@@ -106,12 +161,12 @@ enum TagRules {
             )
         }
         if let match = near.first { return Match(name: match, existing: true) }
-        return Match(name: families[group]?[key(proposed)] ?? proposed, existing: false)
+        return Match(name: normalized, existing: false)
     }
 
     /// Allow one inserted or missing letter or an adjacent transposition in longer names.
     /// A substitution can change the meaning of an otherwise valid tag.
-    private static func isTypo(_ first: String, _ second: String) -> Bool {
+    static func isTypo(_ first: String, _ second: String) -> Bool {
         let a = Array(first)
         let b = Array(second)
         if min(a.count, b.count) < 6 || abs(a.count - b.count) > 1 { return false }
@@ -138,6 +193,7 @@ public struct TagVocabulary: Sendable {
 
     /// Reuses prior labels on new scans. Known labels on a source photo take precedence over learned suggestions.
     func propose(for entries: [PhotoEntry]) throws -> [PhotoEntry] {
+        let rules = TagRules(custom: try ReviewLibrary(root: root).read().aliases)
         let profile = try read()
         let approved = profile.examples.keys.sorted().compactMap { profile.examples[$0] }
         let vocabulary = makeVocabulary(approved: approved.map(\.labels), sources: entries.map { Labels($0.existing) })
@@ -151,7 +207,7 @@ public struct TagVocabulary: Sendable {
                 let personal = original.isEmpty ? recommendations(in: group, for: evidence, from: approved) : []
                 let subjective = group == .moods || group == .styles
                 let values = subjective && !personal.isEmpty ? personal : proposed + personal
-                result.metadata[keyPath: group.field] = canonical(values, in: group, vocabulary: vocabulary[group] ?? [])
+                result.metadata[keyPath: group.field] = canonical(values, in: group, vocabulary: vocabulary[group] ?? [], rules: rules)
             }
             return result
         }
@@ -160,9 +216,10 @@ public struct TagVocabulary: Sendable {
     /// Resolve the entire batch before saving the review or updating what has been learned.
     public func approve(_ review: Review, ids: Set<String>, save: (Review) throws -> Void = { _ in }) throws -> Review {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let lock = try POSIXTagLock(url: root.appendingPathComponent("tag-vocabulary.lock"))
+        let lock = try FileAccessLock(url: root.appendingPathComponent("tag-vocabulary.lock"))
         defer { withExtendedLifetime(lock) {} }
         var profile = try read()
+        let rules = TagRules(custom: try ReviewLibrary(root: root).read().aliases)
         var updated = review
         let ordered = profile.examples.keys.sorted().compactMap { profile.examples[$0]?.labels }
         let existing = review.photos.flatMap { photo in
@@ -180,7 +237,7 @@ public struct TagVocabulary: Sendable {
                 for tag in tags {
                     let available = vocabulary[group] ?? []
                     do {
-                        let match = try TagRules.resolve(tag, in: group, candidates: available)
+                        let match = try rules.resolve(tag, in: group, candidates: available, enforceUserPreference: true)
                         if seen.insert(match.name.lowercased()).inserted { resolved.append(match.name) }
                         if !match.existing { vocabulary[group, default: []].append(match.name) }
                     } catch {
@@ -202,7 +259,7 @@ public struct TagVocabulary: Sendable {
 
     public func forget(_ photoID: String) throws {
         guard FileManager.default.fileExists(atPath: file.path) else { return }
-        let lock = try POSIXTagLock(url: root.appendingPathComponent("tag-vocabulary.lock"))
+        let lock = try FileAccessLock(url: root.appendingPathComponent("tag-vocabulary.lock"))
         defer { withExtendedLifetime(lock) {} }
         var profile = try read()
         if profile.examples.removeValue(forKey: photoID) != nil { try write(profile) }
@@ -214,13 +271,13 @@ public struct TagVocabulary: Sendable {
         try encoder.encode(profile).write(to: file, options: .atomic)
     }
 
-    private func canonical(_ tags: [String], in group: TagGroup, vocabulary: [String]) -> [String] {
+    private func canonical(_ tags: [String], in group: TagGroup, vocabulary: [String], rules: TagRules) -> [String] {
         var available = vocabulary
         var seen = Set<String>()
         return tags.compactMap { input in
             let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { return nil }
-            let match = try? TagRules.resolve(name, in: group, candidates: available)
+            let match = try? rules.resolve(name, in: group, candidates: available, enforceUserPreference: true)
             let result = match?.name ?? name // Retain ambiguous input so approval can ask the reviewer.
             if match?.existing == false { available.append(result) }
             return seen.insert(result.lowercased()).inserted ? result : nil
@@ -290,7 +347,7 @@ public struct TagVocabulary: Sendable {
     }
 }
 
-private final class POSIXTagLock {
+final class FileAccessLock {
     private let descriptor: Int32
 
     init(url: URL) throws {

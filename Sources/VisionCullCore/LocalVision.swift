@@ -11,7 +11,7 @@ public struct LocalVisionAnalyzer: PhotoAnalyzer {
     }
 
     public var cacheVersion: String {
-        "vision-classification-2/\(ProcessInfo.processInfo.operatingSystemVersionString)/duplicates=\(includeDuplicates)"
+        "vision-classification-3/\(ProcessInfo.processInfo.operatingSystemVersionString)/duplicates=\(includeDuplicates)"
     }
 
     public func analyze(_ file: URL) throws -> ImageAnalysis {
@@ -31,22 +31,8 @@ public struct LocalVisionAnalyzer: PhotoAnalyzer {
                 .filter { seen.insert($0.lowercased()).inserted }
             let subjects = Array(labels.prefix(5))
             let category = Self.category(for: subjects)
-            var vector: [Float]?
-            if includeDuplicates, let feature = features.results?.first {
-                switch feature.elementType {
-                case .float:
-                    vector = feature.data.withUnsafeBytes { raw in
-                        stride(from: 0, to: raw.count, by: MemoryLayout<Float>.size)
-                            .map { raw.loadUnaligned(fromByteOffset: $0, as: Float.self) }
-                    }
-                case .double:
-                    vector = feature.data.withUnsafeBytes { raw in
-                        stride(from: 0, to: raw.count, by: MemoryLayout<Double>.size)
-                            .map { Float(raw.loadUnaligned(fromByteOffset: $0, as: Double.self)) }
-                    }
-                default: break
-                }
-            }
+            let observation = includeDuplicates ? features.results?.first : nil
+            let vector = observation.flatMap(Self.featureVector)
             let visual = ImageAppearance.read(file)
             let aestheticResult = aesthetic.results?.first
             return ImageAnalysis(
@@ -61,6 +47,24 @@ public struct LocalVisionAnalyzer: PhotoAnalyzer {
         throw WorkflowError.message("Apple Vision analysis is available on macOS 15 or later.")
         #endif
     }
+
+    #if os(macOS)
+    static func featureVector(_ feature: VNFeaturePrintObservation) -> [Float]? {
+        switch feature.elementType {
+        case .float:
+            return feature.data.withUnsafeBytes { raw in
+                stride(from: 0, to: raw.count, by: MemoryLayout<Float>.size)
+                    .map { raw.loadUnaligned(fromByteOffset: $0, as: Float.self) }
+            }
+        case .double:
+            return feature.data.withUnsafeBytes { raw in
+                stride(from: 0, to: raw.count, by: MemoryLayout<Double>.size)
+                    .map { Float(raw.loadUnaligned(fromByteOffset: $0, as: Double.self)) }
+            }
+        default: return nil
+        }
+    }
+    #endif
 
     static func topics(for labels: [String]) -> [String] {
         let rules = [

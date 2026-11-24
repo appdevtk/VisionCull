@@ -144,7 +144,7 @@ public struct PhotoMetadata: Codable, Equatable, Sendable {
 
 }
 
-enum TagGroup: String, CaseIterable, Codable, Sendable {
+public enum TagGroup: String, CaseIterable, Codable, Sendable {
     case subjects = "Motifs"
     case topics = "Topics"
     case moods = "Moods"
@@ -228,6 +228,7 @@ public struct PhotoEntry: Codable, Equatable, Identifiable, Sendable {
     public let fromApplePhotos: Bool
     public var metadata: PhotoMetadata
     public var approved: Bool
+    public var seriesFavorite: Bool? = nil
 
     public init(
         id: String, file: URL, relativePath: String, revision: FileRevision,
@@ -245,9 +246,14 @@ public struct PhotoEntry: Codable, Equatable, Identifiable, Sendable {
     }
 
     public func matchesSearch(_ query: String) -> Bool {
+        matchesSearch(query, rules: TagRules())
+    }
+
+    func matchesSearch(_ query: String, rules: TagRules) -> Bool {
         let terms = query.split(whereSeparator: \.isWhitespace)
+        guard !terms.isEmpty else { return true }
         let tags = TagGroup.allCases.flatMap { group in
-            metadata[keyPath: group.field].flatMap { TagRules.searchNames(for: $0, in: group) }
+            metadata[keyPath: group.field].flatMap { rules.searchNames(for: $0, in: group) }
         }
         let fields = [relativePath, metadata.category, metadata.description] + tags
         return terms.allSatisfy { term in

@@ -10,8 +10,21 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    name: Build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            metadata_only: '0'
+          - runner: macos-15-intel
+            arch: x86_64
+            metadata_only: '1'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    env:
+      VISIONCULL_CI_METADATA_ONLY: ${{ matrix.metadata_only }}
     steps:
       - uses: actions/checkout@v5
       - name: Toolchain
@@ -20,7 +33,11 @@ jobs:
           swift --version
           uname -m
       - name: Test core workflow and local Vision
+        if: matrix.arch == 'arm64'
         run: Scripts/ci-check.sh swift test
+      - name: Test portable workflow and ImageIO on Intel
+        if: matrix.arch == 'x86_64'
+        run: Scripts/ci-check.sh swift test --skip 'testAppleVisionRunsOnLocalFixture|testReferenceImageSearchUsesLocalVisionAndCache'
       - name: Build app bundle and CLI
         run: Scripts/ci-check.sh Scripts/build-macos.sh
       - name: Scan, preview and export with the packaged CLI
@@ -29,7 +46,7 @@ jobs:
         run: ditto -c -k --keepParent dist/visioncull dist/visioncull-cli-macOS.zip
       - uses: actions/upload-artifact@v5
         with:
-          name: VisionCull-macOS
+          name: VisionCull-macOS-${{ matrix.arch }}
           path: |
             dist/VisionCull-macOS.zip
             dist/visioncull-cli-macOS.zip

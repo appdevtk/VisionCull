@@ -162,6 +162,17 @@ private final class Workspace: ObservableObject {
         }
     }
 
+    func applyBatchEdit(_ edit: BatchMetadataEdit) throws {
+        guard let review else { return }
+        guard drafts.isEmpty else { throw WorkflowError.message("Save or discard unsaved metadata edits first.") }
+        self.review = try edit.applying(to: review, ids: marked)
+        status = "Applied edits to \(marked.count) marked photos."
+    }
+
+    func setFavorite(_ id: String, members: [String]) {
+        review?.setFavorite(id, in: members)
+    }
+
     func export(alongside: Bool) {
         guard let review, checkForDrafts() else { return }
         let target: SidecarTarget
@@ -223,6 +234,11 @@ private final class Workspace: ObservableObject {
     }
 }
 
+private enum ReviewPanel: String, Identifiable {
+    case searches, tags, editing, content, immich
+    var id: String { rawValue }
+}
+
 @MainActor
 private struct WorkspaceView: View {
     @StateObject private var workspace = Workspace()
@@ -232,10 +248,14 @@ private struct WorkspaceView: View {
     @State private var showIssues = false
     @State private var confirmApproval = false
     @State private var confirmAlongside = false
+    @State private var toolsPanel: ReviewPanel?
+    @State private var preferences = ReviewPreferences()
+    @State private var savedSearch: SavedSearch?
 
     private var photos: [PhotoEntry] { workspace.review?.photos ?? [] }
     private var visible: [PhotoEntry] {
-        photos.filter { photo in
+        let first = savedSearch?.query.matching(photos, aliases: preferences.aliases) ?? photos
+        return ReviewFilterQuery(text: query).matching(first, aliases: preferences.aliases).filter { photo in
             let matches: Bool
             switch filter {
             case .all: matches = true
@@ -243,7 +263,7 @@ private struct WorkspaceView: View {
             case .approved: matches = photo.approved
             case .similar: matches = workspace.matches[photo.id] != nil
             }
-            return matches && (query.isEmpty || photo.matchesSearch(query))
+            return matches
         }
     }
 
@@ -254,6 +274,13 @@ private struct WorkspaceView: View {
                     ForEach(ReviewFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 .padding(12)
+                if let savedSearch {
+                    HStack {
+                        Text(savedSearch.name).font(.callout).lineLimit(1)
+                        Spacer()
+                        Button("Clear Filter", systemImage: "xmark.circle") { self.savedSearch = nil }.labelStyle(.iconOnly)
+                    }.padding(.horizontal, 12).padding(.bottom, 8)
+                }
                 List(visible, selection: $workspace.selection) { entry in
                     HStack(spacing: 10) {
                         Toggle("Mark \(entry.file.lastPathComponent) for approval", isOn: Binding(
@@ -343,6 +370,14 @@ private struct WorkspaceView: View {
                     Label("Approve \(workspace.marked.count) Marked", systemImage: "checkmark.circle")
                 }
                 .disabled(workspace.marked.isEmpty)
+                Menu("Tools", systemImage: "slider.horizontal.3") {
+                    Button("Saved Searches…") { toolsPanel = .searches }
+                    Button("Tag Synonyms…") { toolsPanel = .tags }
+                    Button("Find by Content…") { toolsPanel = .content }.disabled(photos.isEmpty)
+                    Divider()
+                    Button("Edit Marked Photos…") { toolsPanel = .editing }.disabled(workspace.marked.isEmpty || !workspace.drafts.isEmpty)
+                    Button("Preview Marked in Immich…") { toolsPanel = .immich }.disabled(workspace.marked.isEmpty || !workspace.drafts.isEmpty)
+                }
                 Menu("Export", systemImage: "square.and.arrow.up") {
                     Button("Save Review…", action: workspace.saveReview)
                         .disabled(workspace.review == nil)
@@ -355,6 +390,19 @@ private struct WorkspaceView: View {
             }
         }
         .disabled(workspace.activity != nil)
+        .onAppear {
+            do { preferences = try ReviewLibrary().read() }
+            catch { workspace.alert = error.localizedDescription }
+        }
+        .sheet(item: $toolsPanel) { panel in
+            switch panel {
+            case .searches: SavedSearchPanel(preferences: $preferences) { savedSearch = $0 }
+            case .tags: TagAliasPanel(preferences: $preferences, photos: photos)
+            case .editing: BatchEditPanel(count: workspace.marked.count, apply: workspace.applyBatchEdit)
+            case .content: ContentSearchPanel(photos: photos) { workspace.marked.formUnion($0) }
+            case .immich: ImmichBatchPanel(photos: photos.filter { workspace.marked.contains($0.id) }, aliases: preferences.aliases)
+            }
+        }
         .sheet(isPresented: $photosOptions) { photosSheet }
         .sheet(isPresented: $showIssues) {
             VStack(alignment: .leading, spacing: 12) {
@@ -411,6 +459,12 @@ private struct PhotoInspector: View {
     let entry: PhotoEntry
     @ObservedObject var workspace: Workspace
     @State private var showImmich = false
+    @State private var showComparison = false
+    private var comparePhotos: [PhotoEntry] {
+        guard let review = workspace.review else { return [] }
+        guard let group = workspace.matches[entry.id] else { return review.photos }
+        return group.compactMap { id in review.photos.first { $0.id == id } }
+    }
 
     private var draft: Binding<MetadataDraft> {
         Binding(
@@ -431,6 +485,9 @@ private struct PhotoInspector: View {
                 Thumbnail(url: entry.file, pixels: 1400)
                     .frame(maxWidth: .infinity).frame(height: 330)
                     .background(Color.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 10))
+                if comparePhotos.count >= 2 {
+                    Button("Compare Photos…", systemImage: "rectangle.split.2x1") { showComparison = true }
+                }
                 if let group = workspace.matches[entry.id] {
                     Text("Similar Photos").font(.headline)
                     ScrollView(.horizontal) {
@@ -473,6 +530,14 @@ private struct PhotoInspector: View {
             .frame(maxWidth: .infinity)
         }
         .sheet(isPresented: $showImmich) { ImmichSheet(photo: entry) }
+        .sheet(isPresented: $showComparison) {
+            let group = workspace.matches[entry.id]
+            SeriesComparison(
+                photos: comparePhotos, starting: entry.id,
+                favorite: workspace.review?.suggestedFavorite(in: group ?? [entry.id, comparePhotos.first { $0.id != entry.id }?.id ?? entry.id]),
+                grouped: group != nil, selectFavorite: workspace.setFavorite
+            )
+        }
     }
 
     private var metadataFields: some View {
@@ -604,7 +669,7 @@ private struct AestheticSummary: View {
     }
 }
 
-private struct Thumbnail: View {
+struct Thumbnail: View {
     let url: URL
     let pixels: Int
     @State private var image: CGImage?
@@ -704,7 +769,7 @@ private struct ImmichSheet: View {
         let selectedAsset = UUID(uuidString: asset.trimmingCharacters(in: .whitespacesAndNewlines))
         let action = action
         do {
-            let client = try ImmichClient(server: url, apiKey: key)
+            let client = try ImmichClient(server: url, apiKey: key, aliases: ReviewLibrary().read().aliases)
             busy = true
             message = nil
             Task {

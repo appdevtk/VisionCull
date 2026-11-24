@@ -4,7 +4,7 @@ VisionCull is a native macOS app and Swift CLI for reviewing and tagging photos 
 
 ## Build and run
 
-Requires macOS 15+ and Xcode 16+ on a Mac. GitHub Actions builds and tests both products in the [macOS workflow](.github/workflows/macos.yml). The workflow uploads the app and CLI as ZIP artifacts. For a local development build:
+Requires macOS 15+ and Xcode 16+ on a Mac. GitHub Actions builds and tests both products in the [macOS workflow](.github/workflows/macos.yml). The workflow uploads the app and CLI as ZIP artifacts for Apple Silicon and Intel. Apple Silicon runs the Vision and reference-image tests. Intel checks the native build, ImageIO metadata, and the metadata-only CLI workflow. For a local development build:
 
 ```sh
 swift test
@@ -54,6 +54,26 @@ Choose an approved photo and explicitly select **Update Existing** or **Upload N
 - **Upload new:** Supply a target album UUID. VisionCull checks for an existing checksum before sending the image. A duplicate result asks you to verify the returned asset ID and then explicitly choose Update. If an upload succeeds and a later step fails, the error includes the new asset ID so you can finish with Update and the album UUID.
 - VisionCull reads the server’s tag catalog before sending tags. The API key needs permission to read tags as well as to create and attach them as needed. It reuses matching tags and their IDs, including recognized German and English names. For several uncertain matches, edit the tag in the review and approve again before retrying. VisionCull adds confirmed motifs and category as Immich tags. Topics, moods, and styles use searchable paths such as `VisionCull/Topics/Travel`, `VisionCull/Moods/Calm`, and `VisionCull/Styles/Warm tones`. The same paths are exported as XMP keywords. A confirmed star rating becomes the Immich rating and `xmp:Rating`. Existing Immich tags are preserved, and empty fields are skipped. To send an edited capture time to Immich, include an explicit timezone offset. The server URL must use HTTPS, with HTTP accepted on loopback for local testing.
 
+### Saved searches, comparison, and content
+
+- **Tools → Saved Searches** combines text, topics, moods, styles, and minimum stars. Apply a filter, mark its results, and use **Edit Marked Photos** to add tags or set stars for the batch. Edits go back to Pending before they can be sent.
+- **Tools → Tag Synonyms** stores your preferred spelling. The duplicate check lists close pairs in the open review or the Immich tag catalog. Choose **Use as Alias**, adjust the two names if needed, and save the rule. Applying aliases at approval normalizes the review. Immich looks for an existing tag ID when syncing.
+- **Compare Photos** in the inspector opens similar photos side by side. You can also pick two photos manually. Zoom and drag are linked. The detail score is an estimate from a downsized preview, so it is most useful for comparing the same scene. Choose a favorite to store it in the review. A fresh scan adds detail values to older photos.
+- **Tools → Find by Content** ranks the open review by a description or a reference photo. Text searches use Vision's recognized concepts and local language embeddings when available. Reference search uses Vision feature prints. Mark interesting results to tag them together. A first reference search caches any missing feature prints locally.
+
+### Immich batches
+
+Mark the approved photos and choose **Tools → Preview Marked in Immich**. The preview searches by exact checksum and verifies the returned asset. For several matches, enter the verified asset UUID for that row. For a new upload, choose **Upload new** on that row and enter the album UUID. The preview lists fields and reused or new tags for each proposed action. Send only the selected, ready rows. Changed target metadata or tag mappings require a fresh preview.
+
+Use `visioncull immich batch REVIEW.json --preset NAME --server URL` for a CLI preview. Add `--apply` to send after the checks pass. A map file supplied via `--map FILE.json` uses the exact relative path as the key and one explicit action per value:
+
+```json
+{
+  "day-1/IMG_001.jpg": { "assetID": "f7d2d3d4-2832-4ad3-8606-dfb56f1518b5" },
+  "day-1/IMG_002.jpg": { "uploadAlbumID": "b627b862-c762-4387-a979-9bd5baad59eb" }
+}
+```
+
 ### CLI example
 
 ```sh
@@ -63,6 +83,9 @@ dist/visioncull edit review.json 'day-1/IMG_001.jpg' \
   --subjects 'garden,flowers' --category Nature --description 'Flowers beside a path' \
   --topics 'Flowers & gardens' --moods 'Calm' --styles 'Soft contrast' --rating 4
 dist/visioncull preview review.json --search 'garden calm'
+dist/visioncull search save 'Calm garden' --topics 'Flowers & gardens' --moods Calm --stars 4
+dist/visioncull search run 'Calm garden' review.json
+dist/visioncull find review.json --text 'ruhiger Garten'
 dist/visioncull approve review.json 'day-1/IMG_001.jpg'
 dist/visioncull export review.json --output ./xmp-export
 ```

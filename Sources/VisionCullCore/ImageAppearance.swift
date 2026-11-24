@@ -14,6 +14,7 @@ public struct ImageAppearance: Codable, Equatable, Sendable {
     public let shadowFraction: Double
     public let highlightFraction: Double
     public let palette: [String]
+    public let edgeDetail: Double?
 
     var styleSuggestions: [String] {
         var tags = [String]()
@@ -37,9 +38,10 @@ public struct ImageAppearance: Codable, Equatable, Sendable {
         return []
     }
 
-    static func measure(premultipliedRGBA pixels: [UInt8]) -> ImageAppearance? {
+    static func measure(premultipliedRGBA pixels: [UInt8], width: Int? = nil) -> ImageAppearance? {
         guard pixels.count.isMultiple(of: 4) else { return nil }
         var lumas = [Double]()
+        var grid = [Double?](repeating: nil, count: pixels.count / 4)
         var saturation = 0.0
         var warmth = 0.0
         var shadows = 0
@@ -54,6 +56,7 @@ public struct ImageAppearance: Codable, Equatable, Sendable {
             let blue = min(1, Double(pixels[i + 2]) / alpha)
             let luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue
             lumas.append(luma)
+            grid[i / 4] = luma
             let peak = max(red, green, blue)
             if peak > 0 { saturation += (peak - min(red, green, blue)) / peak }
             warmth += red - blue
@@ -74,8 +77,26 @@ public struct ImageAppearance: Codable, Equatable, Sendable {
         }.prefix(3).map { $0.value.hex }
         return ImageAppearance(
             brightness: brightness, contrast: contrast, saturation: saturation / count, warmth: warmth / count,
-            shadowFraction: Double(shadows) / count, highlightFraction: Double(highlights) / count, palette: palette
+            shadowFraction: Double(shadows) / count, highlightFraction: Double(highlights) / count,
+            palette: palette, edgeDetail: width.flatMap { detail(in: grid, width: $0) }
         )
+    }
+
+    private static func detail(in lumas: [Double?], width: Int) -> Double? {
+        guard width > 2, lumas.count.isMultiple(of: width), lumas.count / width > 2 else { return nil }
+        var squared = 0.0
+        var count = 0
+        for row in 1..<(lumas.count / width - 1) {
+            for column in 1..<(width - 1) {
+                let i = row * width + column
+                guard let center = lumas[i], let left = lumas[i - 1], let right = lumas[i + 1],
+                      let top = lumas[i - width], let bottom = lumas[i + width] else { continue }
+                let laplacian = 4 * center - left - right - top - bottom
+                squared += laplacian * laplacian
+                count += 1
+            }
+        }
+        return count == 0 ? nil : sqrt(squared / Double(count))
     }
 
     private struct ColorBucket {
@@ -103,7 +124,7 @@ public struct ImageAppearance: Codable, Equatable, Sendable {
         let thumbnailOptions = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 96,
+            kCGImageSourceThumbnailMaxPixelSize: 192,
         ] as CFDictionary
         guard let source = CGImageSourceCreateWithURL(file as CFURL, sourceOptions),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions),
@@ -119,7 +140,7 @@ public struct ImageAppearance: Codable, Equatable, Sendable {
             context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
             return true
         }
-        return rendered ? measure(premultipliedRGBA: pixels) : nil
+        return rendered ? measure(premultipliedRGBA: pixels, width: width) : nil
     }
     #endif
 }

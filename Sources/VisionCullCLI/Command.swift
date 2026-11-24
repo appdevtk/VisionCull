@@ -21,10 +21,18 @@ struct Command {
       visioncull export REVIEW.json (--alongside | --output DIR)
       visioncull immich update REVIEW.json PHOTO --server URL --asset-id UUID [--album UUID]
       visioncull immich upload REVIEW.json PHOTO --server URL --album UUID
+      visioncull immich batch REVIEW.json (--all | --preset NAME | PHOTO...) --server URL [--map FILE.json] [--apply]
+      visioncull search save NAME [--query TEXT --topics A,B --moods A,B --styles A,B --stars N]
+      visioncull search list | search run NAME REVIEW.json | search remove NAME
+      visioncull batch-edit REVIEW.json (--all | --preset NAME | PHOTO...) [--topics A,B --moods A,B --styles A,B --rating 0…5]
+      visioncull tags alias GROUP ALIAS PREFERRED | tags list | tags remove UUID | tags duplicates REVIEW.json [--server URL]
+      visioncull find REVIEW.json (--text QUERY | --image FILE) [--limit N]
+      visioncull series REVIEW.json PHOTO [OTHER...] [--favorite PHOTO]
 
     PHOTO is an exact relative path or ID from preview. Edits clear prior approval.
     Use a rating of 0 to clear stars in the review.
-    Immich reads IMMICH_API_KEY from the environment. Upload sends only the named approved image.
+    Immich reads IMMICH_API_KEY from the environment. Batch previews by default. Uploads require a named album for each photo.
+    Use --cache DIR to share the same local saved searches and aliases across CLI calls.
     """
 
     static func main() async {
@@ -72,11 +80,11 @@ struct Command {
             print("\(review.photos.count) photos, \(review.analyzed) analyzed, \(review.reused) cached, \(review.issues.count) issues")
             for issue in review.issues { print("! \(issue.path): \(issue.message)") }
         case "preview":
-            let options = try Options(args, values: ["--search"])
+            let options = try Options(args, values: ["--search", "--cache"])
             try options.expect(1)
             let review = try Review.read(file(options.positionals[0]))
             let query = options.value("--search") ?? ""
-            let matches = review.photos.filter { $0.matchesSearch(query) }
+            let matches = try ReviewFilterQuery(text: query).matching(review.photos, aliases: preferences(options).aliases)
             for entry in matches {
                 let value = entry.metadata
                 let coords = value.latitude.flatMap { lat in value.longitude.map { "\(lat), \($0)" } } ?? ""
@@ -131,7 +139,13 @@ struct Command {
             let result = try XMP.export(Review.read(file(options.positionals[0])), to: target)
             for url in result { print(url.path) }
         case "immich":
-            try await immich(args)
+            if args.first == "batch" { try await immichBatch(Array(args.dropFirst())) }
+            else { try await immich(args) }
+        case "search": try searchCommands(args)
+        case "batch-edit": try batchEdit(args)
+        case "tags": try await tagCommands(args)
+        case "find": try find(args)
+        case "series": try series(args)
         default:
             throw WorkflowError.message("Unknown command '\(command)'. See --help.")
         }
@@ -189,13 +203,12 @@ struct Command {
         }
         let options = try Options(
             Array(args.dropFirst()),
-            values: action == "update" ? ["--server", "--asset-id", "--album"] : ["--server", "--album"]
+            values: action == "update" ? ["--server", "--asset-id", "--album", "--cache"] : ["--server", "--album", "--cache"]
         )
         try options.expect(2)
         let review = try Review.read(file(options.positionals[0]))
         let photo = review.photos[try index(options.positionals[1], in: review)]
-        guard let url = URL(string: try options.required("--server")) else { throw WorkflowError.message("Invalid Immich URL.") }
-        let client = try ImmichClient(server: url, apiKey: ProcessInfo.processInfo.environment["IMMICH_API_KEY"] ?? "")
+        let client = try remoteClient(options)
         let album = try options.value("--album").map { try uuid($0, option: "--album") }
         if action == "update" {
             let asset = try uuid(options.required("--asset-id"), option: "--asset-id")
@@ -208,16 +221,16 @@ struct Command {
         }
     }
 
-    private static func file(_ path: String) -> URL {
+    static func file(_ path: String) -> URL {
         URL(fileURLWithPath: NSString(string: path).expandingTildeInPath).standardizedFileURL
     }
 
-    private static func uuid(_ string: String, option: String) throws -> UUID {
+    static func uuid(_ string: String, option: String) throws -> UUID {
         guard let value = UUID(uuidString: string) else { throw WorkflowError.message("\(option) requires a UUID.") }
         return value
     }
 
-    private static func index(_ selector: String, in review: Review) throws -> Int {
+    static func index(_ selector: String, in review: Review) throws -> Int {
         let matches = review.photos.indices.filter {
             review.photos[$0].relativePath == selector || review.photos[$0].id == selector
         }
@@ -233,7 +246,7 @@ private struct MetadataOnly: PhotoAnalyzer {
     func analyze(_ file: URL) throws -> ImageAnalysis { ImageAnalysis() }
 }
 
-private struct Options {
+struct Options {
     var positionals: [String] = []
     private var arguments: [String: String] = [:]
 
