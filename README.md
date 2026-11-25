@@ -4,7 +4,7 @@ VisionCull is a native macOS app and Swift CLI for reviewing and tagging photos 
 
 ## Build and run
 
-Requires macOS 15+ and Xcode 16+ on a Mac. The [macOS build workflow](.github/workflows/macos.yml) uses an Intel runner to compile and package universal app and CLI binaries with both `arm64` and `x86_64` slices. It verifies both slices and runs the metadata-only CLI smoke test. The [Vision workflow](.github/workflows/macos-vision.yml) runs the on-device analysis and reference-image tests on Apple Silicon. For a local development build:
+Requires macOS 15+ and Xcode 16+ on a Mac. The [macOS workflow](.github/workflows/macos.yml) builds the app and CLI on an Apple Silicon runner. It exercises Apple Vision and the full CLI workflow on-device, verifies that both executables contain ARM64 code, and packages them as ZIP artifacts. For a local development build:
 
 ```sh
 swift test
@@ -13,7 +13,7 @@ open dist/VisionCull.app
 dist/visioncull --help
 ```
 
-Run `Scripts/build-macos.sh --universal` to build both slices locally. The build is ad-hoc signed for development. Distribution to other Macs may require Developer ID signing and notarization.
+The build is ad-hoc signed for development. Distribution to other Macs may require Developer ID signing and notarization.
 
 ## Review photos
 
